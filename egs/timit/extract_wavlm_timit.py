@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 
 """
-Extract WavLM features for a LibriSpeech set.
+Extract WavLM features for a TIMIT set.
 
-Author: Herman Kamper
-Date: 2024
+Author: Henry Li Xinyuan
+Date: 2025
 """
 
 from pathlib import Path
@@ -23,14 +23,14 @@ device = "cuda"
 def check_argv():
     parser = argparse.ArgumentParser(description=__doc__.strip().split("\n")[0])
     parser.add_argument(
-        "librispeech_dir",
+        "--timit_dir",
         type=Path,
-        help="LibriSpeech directory ending in e.g. `dev-clean/`",
+        help="TIMIT directory ending in e.g. `dev-clean/`",
     )
     parser.add_argument(
-        "output_dir",
+        "--output_dir",
         type=Path,
-        help="output will be written to a `wavlm/` subdirectory",
+        help="output will be written to a subdirectory",
     )
     parser.add_argument(
         "--pca",
@@ -66,35 +66,40 @@ def main(args):
         with open(args.exclude) as f:
             for line in f:
                 exclude_utterances.add(line.strip())
+    else:
+        exclude_utterances = []
 
-    wav_dir = args.librispeech_dir
+    wav_dir = args.timit_dir
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("Writing to:", output_dir)
-    for speaker_dir in tqdm(sorted(wav_dir.glob("*"))):
-        speaker = speaker_dir.stem
+    wavs = sorted(wav_dir.rglob('*.WAV'))
+
+    features = {}
+    for wav_file in tqdm(wavs):
+        if wav_file.stem in exclude_utterances:
+            continue
+        wav_elements = str(wav_file).split('/')
+        speaker = wav_elements[-2]
+        wav, sr = torchaudio.load(wav_file)
+        wav = wav.to(device)
+        with torch.inference_mode():
+            x, _ = wavlm.extract_features(wav, output_layer=6)
+        if pca is not None:
+            x = pca_transform(
+                x, pca["mean"], pca["components"], pca["explained_variance"]
+            )
+        x = x.cpu().numpy().squeeze()
+        if speaker not in features:
+            features[speaker] = [x]
+        else:
+            features[speaker].append(x)
+
+    for speaker in features:
         output_fn = (output_dir / speaker).with_suffix(".npy")
-        # if output_fn.is_file():
-        #     continue
-
-        features = []
-        for wav_fn in tqdm(sorted(speaker_dir.rglob("*/*.flac")), leave=False):
-            if wav_fn.stem in exclude_utterances:
-                continue
-            wav, _ = torchaudio.load(wav_fn)
-            wav = wav.to(device)
-            with torch.inference_mode():
-                x, _ = wavlm.extract_features(wav, output_layer=6)
-            if pca is not None:
-                x = pca_transform(
-                    x, pca["mean"], pca["components"], pca["explained_variance"]
-                )
-            x = x.cpu().numpy().squeeze()
-            features.append(x)
-
-        features = np.vstack(features, dtype=np.float16)
-        np.save(output_fn, features)
+        features[speaker] = np.vstack(features[speaker], dtype=np.float16)
+        np.save(output_fn, features[speaker])
 
 
 if __name__ == "__main__":

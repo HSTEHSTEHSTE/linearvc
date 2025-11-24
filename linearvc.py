@@ -67,14 +67,14 @@ class LinearVC(nn.Module):
         if not parallel:
             # Source features
             source_features = []
-            print("Source features:")
+            # print("Source features:")
             for wav_fn in tqdm(sorted(source_wavs), leave=True):
                 source_features.append(self.get_features(wav_fn, vad))
             source_features = torch.vstack(source_features)[:n_frames_max, :]
 
             # Target features
             target_features = []
-            print("Target features:")
+            # print("Target features:")
             for wav_fn in tqdm(sorted(target_wavs), leave=True):
                 target_features.append(self.get_features(wav_fn, vad))
             target_features = torch.vstack(target_features)[:n_frames_max, :]
