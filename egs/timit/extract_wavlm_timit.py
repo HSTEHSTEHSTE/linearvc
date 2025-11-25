@@ -15,7 +15,7 @@ import sys
 import torch
 import torchaudio
 
-from utils import pca_transform
+from ...utils import pca_transform
 
 device = "cuda"
 
@@ -41,6 +41,12 @@ def check_argv():
         "--exclude",
         type=Path,
         help="exclude utterances with filenames in this file",
+    )
+    parser.add_argument(
+        "--save_mode",
+        type=str,
+        help="save mode: 'spks' or 'utts'",
+        default='utts',
     )
     return parser.parse_args()
 
@@ -70,7 +76,7 @@ def main(args):
         exclude_utterances = []
 
     wav_dir = args.timit_dir
-    output_dir = args.output_dir
+    output_dir = args.output_dir / args.save_mode
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("Writing to:", output_dir)
@@ -91,15 +97,21 @@ def main(args):
                 x, pca["mean"], pca["components"], pca["explained_variance"]
             )
         x = x.cpu().numpy().squeeze()
-        if speaker not in features:
-            features[speaker] = [x]
-        else:
-            features[speaker].append(x)
+        if args.save_mode == 'spks':
+            if speaker not in features:
+                features[speaker] = [x]
+            else:
+                features[speaker].append(x)
+        elif args.save_mode == 'utts':
+            output_fn = (output_dir / (wav_file.parent.relative_to(wav_dir)) / wav_file.stem).with_suffix(".npy")
+            output_fn.parent.mkdir(parents=True, exist_ok=True)
+            np.save(output_fn, x)
 
-    for speaker in features:
-        output_fn = (output_dir / speaker).with_suffix(".npy")
-        features[speaker] = np.vstack(features[speaker], dtype=np.float16)
-        np.save(output_fn, features[speaker])
+    if args.save_mode == 'spks':
+        for speaker in features:
+            output_fn = (output_dir / speaker).with_suffix(".npy")
+            features[speaker] = np.vstack(features[speaker], dtype=np.float16)
+            np.save(output_fn, features[speaker])
 
 
 if __name__ == "__main__":

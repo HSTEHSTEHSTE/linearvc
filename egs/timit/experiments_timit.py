@@ -13,7 +13,7 @@ import time
 import torch
 import torchaudio
 
-from utils import fast_cosine_dist
+from ...utils import fast_cosine_dist
 
 device = "cuda"
 wavlm = torch.hub.load("bshall/knn-vc", "wavlm_large", trust_repo=True, device=device)
@@ -24,15 +24,15 @@ wav_dir = Path(f"/home/hltcoe/xli/ARTS/corpora/TIMIT/TIMIT/{subset}")
 n_frames = 8192
 k_top = 1
 
-feats_dir = Path(f"/home/hltcoe/xli/ARTS/linearvc/exp/wavlm_feats/timit/{subset}")
+feats_dir = Path(f"/home/hltcoe/xli/ARTS/linearvc/exp/wavlm_feats/timit/{subset}/spks")
 feats_dict = {}
 print("Reading from:", feats_dir)
 for speaker_feats_fn in tqdm(sorted(feats_dir.glob("*.npy"))):
     speaker = speaker_feats_fn.stem
-    feats_dict[speaker] = np.load(speaker_feats_fn)
+    feats_dict[speaker] = np.load(speaker_feats_fn, allow_pickle=True)
 print("No. speakers:", len(feats_dict))
 
-rank = 100
+rank = 10
 XS = []
 speakers = sorted(feats_dict)
 for speaker in speakers:
@@ -67,7 +67,8 @@ transforms = {
     f"{speaker}": VT[i, :, :] for i, speaker in enumerate(speakers)
 }
 
-out_path = Path('/home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/TIMIT_' + subset +'/spk_0')
+out_path = Path('/home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/TIMIT_' + subset + '/spk_0_r' + str(rank))
+out_path.mkdir(parents=True, exist_ok=True)
 np.save(out_path / 'XS.npy', XS)
 np.save(out_path / 'U.npy', U)
 np.save(out_path / 'S.npy', S)
