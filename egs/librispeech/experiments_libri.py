@@ -73,14 +73,14 @@ def main(args):
     print("No. speakers:", len(feats_dict))
 
     rank = args.rank
-    XS = []
+    XS_list = []
     speakers = sorted(feats_dict)
     for speaker in speakers:
-        XS.append(feats_dict[speaker][:, :])
+        XS_list.append(feats_dict[speaker][:, :])
 
     for src_spk_index, src_spk in tqdm(enumerate(speakers), total=len(speakers)):
         print("Matching:")
-        XS = [align(XS[src_spk_index], X) for X in tqdm(XS)]
+        XS = [align(XS_list[src_spk_index], X) for X in tqdm(XS_list)]
         XS = np.concatenate(XS, axis=-1)
         XS = np.float32(XS)
 
@@ -105,6 +105,7 @@ def main(args):
                 projmats[f"{source}-{target}"] = (W, None)
 
         out_path = Path('/home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/librispeech_' + subset + '/rank_' + str(rank) + '/src_' + src_spk)
+        out_path.mkdir(parents=True, exist_ok=True)
         np.save(out_path / 'XS.npy', XS)
         np.save(out_path / 'U.npy', U)
         np.save(out_path / 'S.npy', S)
