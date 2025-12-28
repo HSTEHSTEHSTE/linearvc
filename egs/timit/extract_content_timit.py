@@ -2,12 +2,14 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 
-timit_wavlm_feat_path = Path('exp/wavlm_feats/timit/TEST')
+subset = "TRAIN"
+rank = 100
+timit_wavlm_feat_path = Path('exp/wavlm_feats/timit/' + subset)
 speakers = sorted([p.stem for p in (timit_wavlm_feat_path / 'spks').iterdir()])
 timit_wavlm_feats = list((timit_wavlm_feat_path / 'utts').rglob('*.npy'))
 
 
-speaker_matrix_path = Path('/home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/TIMIT_TEST/spk_0_r10/VT.npy')
+speaker_matrix_path = Path('/home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/TIMIT_' + subset + '/spk_0_r' + str(rank) + '/VT.npy')
 speaker_matrix = np.load(speaker_matrix_path)
 out_path = speaker_matrix_path.parent / 'content'
 

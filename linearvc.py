@@ -15,7 +15,7 @@ import torch.nn as nn
 import torchaudio
 import torchaudio.functional as F
 
-from utils import fast_cosine_dist
+from .utils import fast_cosine_dist
 
 n_frames_max = 8192  # maximum no. of matched frames in linear regression
 k_top = 1
@@ -133,7 +133,7 @@ class LinearVC(nn.Module):
             )
             W = linear.coef_.T
 
-        W = torch.from_numpy(W).float().to(self.device)
+        W = W.float().to(self.device)
         return W
 
     @torch.inference_mode()
