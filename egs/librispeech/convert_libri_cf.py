@@ -31,6 +31,12 @@ def check_argv():
         type=Path,
         help="root path to content factorization"
     )
+    parser.add_argument(
+        "--pinv_type",
+        type=str,
+        default='src',
+        help="Pinv matrix. src or anchor"
+    )
     return parser.parse_args()
 
 def get_spk_mapping(spks, seed):
@@ -54,6 +60,7 @@ def main(args):
     out_dir = Path(args.out_dir)
 
     content_path = Path(args.content_factorization_path)
+    spk_anchor = content_path.name.split('_')[-1]
     transforms = np.load(content_path / 'transforms.npy', allow_pickle=True).item()
 
     extensions = ['wav', 'flac']
@@ -91,7 +98,10 @@ def main(args):
         for wav_src in wavs_src:
             input_features = linearvc_model.get_features(wav_src)
             input_features = input_features.cpu().numpy()
-            out_features = torch.tensor(np.dot(np.dot(input_features, np.linalg.pinv(transforms[spk_src])), transforms[spk_tgt])).to(device)
+            if args.pinv_type == 'src':
+                out_features = torch.tensor(np.dot(np.dot(input_features, np.linalg.pinv(transforms[spk_src])), transforms[spk_tgt])).to(device)
+            else:
+                out_features = torch.tensor(np.dot(np.dot(input_features, np.linalg.pinv(transforms[spk_anchor])), transforms[spk_tgt])).to(device)
             wav_hat = hifigan(out_features.unsqueeze(0)).squeeze(0).detach().cpu()
             (out_dir / spk_src).mkdir(parents=True, exist_ok=True)
             torchaudio.save(out_dir / spk_src / (wav_src.stem + '.wav'), wav_hat, 16000)
