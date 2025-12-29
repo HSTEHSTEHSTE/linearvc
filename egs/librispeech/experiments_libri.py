@@ -48,6 +48,11 @@ def check_argv():
         type=int,
         default=100
     )
+    parser.add_argument(
+        "--num_index",
+        type=int,
+        default=1
+    )
     return parser.parse_args()
 
 def align(src, refs):
@@ -78,7 +83,14 @@ def main(args):
     for speaker in speakers:
         XS_list.append(feats_dict[speaker][:, :])
 
+    if args.num_index = -1:
+        num_index = len(speakers)
+    else:
+        num_index = args.num_index
     for src_spk_index, src_spk in tqdm(enumerate(speakers), total=len(speakers)):
+        if src_spk_index > num_index:
+            break
+
         print("Matching:")
         XS = [align(XS_list[src_spk_index], X) for X in tqdm(XS_list)]
         XS = np.concatenate(XS, axis=-1)
