@@ -2,9 +2,12 @@ import argparse
 from pathlib import Path
 import yaml
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+import sentencepiece as spm
+from linearvc import linearvc
 from linearvc.cf_tts.dataset import TTSDataset, FrameBatchSampler, tts_collate
 from linearvc.cf_tts.models.tts import ZipVoice
 
@@ -73,6 +76,28 @@ def main():
         weight_decay=cfg["optim"]["weight_decay"]
     )
 
+    sp = spm.SentencePieceProcessor()
+    sp.load(cfg['training']['spm_file'])
+
+    wavlm = torch.hub.load(
+        "bshall/knn-vc", 
+        "wavlm_large", 
+        trust_repo=True, 
+        progress=True, 
+        device=device, 
+    )
+    hifigan, _ = torch.hub.load(
+        "bshall/knn-vc",
+        "hifigan_wavlm",
+        trust_repo=True,
+        prematched=True,
+        progress=True,
+        device=device,
+    )
+    linearvc_model = linearvc.LinearVC(wavlm, hifigan, device)
+
+    transform = np.load(cfg['training']['content_factorization_file'], allow_pickle=True).item()
+    transform = torch.tensor(np.linalg.pinv(transform[list(transform.keys())[0]])).to(device)
 
     # -------------------------
     # training loop
@@ -88,13 +113,27 @@ def main():
         print(f"\nEpoch {epoch}")
 
         for batch in train_loader:
-            wav = batch["wav"].to(device)              # (B, T)
-            wav_lengths = batch["wav_lengths"].to(device)
-            texts = batch["text"]                      # list[str]
+            wavs = batch["wav"].to(device)            # (B, T)
+            wav_lengths = batch["wav_lengths"]
+            texts = batch["text"]                     # list[str]
             speakers = batch["speaker"]               # list[str]
 
+            text_ids = []
+            for text in texts:
+                text_ids.append(sp.encode_as_ids(text))
+
+            input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
+            input_features = torch.matmul(input_features, transform)
+
+            wav_lengths = torch.floor(wav_lengths / 320).to(device)
+
             # forward
-            outputs = model(wav, wav_lengths, texts, speakers)
+            outputs = model(
+                tokens=text_ids,
+                features=wav,
+                features_lens=wav_lengths,
+
+            )
 
             # assume model returns dict with loss
             loss = outputs["loss"]
