@@ -8,6 +8,7 @@ from typing import Dict, List, Tuple, Optional
 
 import torch, torchaudio
 from torch.utils.data import Dataset
+from torch.utils.data import Sampler
 
 
 class TTSDatum:
@@ -99,6 +100,73 @@ class TTSDataset(Dataset):
 
 
 # -------------------------
+# sampler
+# -------------------------
+class FrameBatchSampler(Sampler):
+    """
+    Groups samples so that the total number of audio frames
+    per batch does not exceed max_frames.
+
+    This gives:
+        short utterances → large batches
+        long utterances  → small batches
+    """
+
+    def __init__(
+        self,
+        dataset,
+        config_file_path: str,
+    ):
+        self.dataset = dataset
+
+        # read config
+        with open(config_file_path, 'r') as config_file:
+            self.config = yaml.safe_load(config_file)
+        self.max_frames = self.config['training']['max_frames_per_batch']
+
+        self.indices = list(range(len(dataset)))
+
+        self.batches = []
+        batch = []
+        total_frames = 0
+        for idx in self.indices:
+            frames = self.dataset.data[idx].num_frames
+
+            # if this utterance alone is too big, force it into its own batch
+            if frames > self.max_frames:
+                if batch:
+                    self.batches.append(batch)
+                    batch = []
+                    total_frames = 0
+                self.batches.append([idx])
+                continue
+
+            if total_frames + frames > self.max_frames and batch:
+                self.batches.append(batch)
+                batch = []
+                total_frames = 0
+
+            batch.append(idx)
+            total_frames += frames
+
+        if batch:
+            self.batches.append(batch)
+        if self.config['training']['shuffle_batches']:
+            random.seed(self.config['training']['random_seed'])
+            random.shuffle(self.batches)
+        self.batches = iter(self.batches)
+
+
+    def __iter__(self):
+        yield next(self.batches)
+        
+
+    def __len__(self):
+        # PyTorch allows this to be approximate
+        return len(self.indices)
+
+
+# -------------------------
 # batching
 # -------------------------
 
@@ -130,3 +198,9 @@ if __name__ == "__main__":
     dataset = TTSDataset(config_file_path='cf_tts/config/config.yaml')
     print(len(dataset))
     print(dataset.__getitem__(0))
+
+    # test sampler
+    sampler = FrameBatchSampler(dataset, config_file_path='cf_tts/config/config.yaml')
+    print(len(sampler))
+    for i in range(5):
+        print(next(iter(sampler)))
