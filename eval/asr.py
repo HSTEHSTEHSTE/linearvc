@@ -24,6 +24,8 @@ def check_argv():
     return parser.parse_args()
 
 def main(args):
+    print("Converted dir: ", args.converted_dir)
+    print("Out transcript dir: ", args.out_transcript_dir)
     converted_dir = Path(args.converted_dir)
     out_transcript_dir = Path(args.out_transcript_dir)
     out_transcript_dir.mkdir(parents=True, exist_ok=True)

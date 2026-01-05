@@ -1,7 +1,7 @@
 import argparse
 import numpy as np
-import torch
-from resemblyzer import VoiceEncoder, preprocess_wav
+import torch, torchaudio
+from speechbrain.inference.speaker import EncoderClassifier
 from pathlib import Path
 from tqdm import tqdm
 
@@ -20,7 +20,7 @@ def check_argv():
     parser.add_argument(
         "--out_embed_dir",
         type=Path,
-        help="directory to store Resemblyzer output",
+        help="directory to store ECAPA-TDNN output",
     )
     return parser.parse_args()
 
@@ -35,7 +35,7 @@ def main(args):
     for spk_long in spks_long:
         spks.append(str(spk_long).split('/')[-1])
 
-    encoder = VoiceEncoder()
+    classifier = EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb")
 
     for spk in tqdm(spks):
         wavs = []
@@ -44,8 +44,8 @@ def main(args):
             wavs += (converted_dir / spk).rglob('*.' + extension)
 
         for wav in tqdm(wavs):
-            wav = preprocess_wav(wav)
-            embed = encoder.embed_utterance(wav)
+            wav, sr = torchaudio.load(wav)
+            embed = classifier.encode_batch(wav).squeeze(0).squeeze(0).cpu().numpy()
             embeds.append(embed)
 
         embeds_avg = np.array(embeds).mean(axis=0)

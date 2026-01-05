@@ -15,7 +15,7 @@ import sys
 import torch
 import torchaudio
 
-from utils import pca_transform
+from linearvc.utils import pca_transform
 
 device = "cuda"
 

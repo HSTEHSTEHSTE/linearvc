@@ -66,6 +66,8 @@ def main(args):
     hifigan, _ = torch.hub.load("bshall/knn-vc", "hifigan_wavlm", trust_repo=True, device=device, prematched=True)
 
     subset = args.subset
+    print('Subset: ', subset)
+    print('Rank: ', args.rank)
     n_frames = args.n_frames
     k_top = args.k_top
 
@@ -83,12 +85,12 @@ def main(args):
     for speaker in speakers:
         XS_list.append(feats_dict[speaker][:, :])
 
-    if args.num_index = -1:
+    if args.num_index == -1:
         num_index = len(speakers)
     else:
         num_index = args.num_index
     for src_spk_index, src_spk in tqdm(enumerate(speakers), total=len(speakers)):
-        if src_spk_index > num_index:
+        if src_spk_index >= num_index:
             break
 
         print("Matching:")
