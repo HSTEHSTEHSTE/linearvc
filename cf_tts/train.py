@@ -32,6 +32,10 @@ def save_checkpoint(model, optimizer, step, path):
         path,
     )
 
+def load_checkpoint(model, path, device):
+    ckpt = torch.load(path, map_location=device)
+    model.load_state_dict(ckpt["model"])
+    return ckpt["step"]
 
 # -------------------------
 # main
@@ -40,6 +44,7 @@ def save_checkpoint(model, optimizer, step, path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument("--checkpoint_path", default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -71,6 +76,11 @@ def main():
     model = ZipVoice(
         **cfg["model"]["tts"]["zipvoice"]
     ).to(device)
+    if args.checkpoint_path is not None:
+        current_step = load_checkpoint(model, args.checkpoint_path, device)
+    else:
+        current_step = 0
+    current_epoch = current_step / len(train_loader)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -114,9 +124,16 @@ def main():
     model.train()
 
     for epoch in range(cfg["training"]["epochs"]):
+        if epoch < current_epoch:
+            continue
+
         print(f"\nEpoch {epoch}")
 
-        for batch in train_loader:
+        for batch_index, batch in enumerate(train_loader):
+            if step < (current_step - current_epoch * len(train_loader)):
+                continue
+            if batch_index > 0:
+                break
             wavs = batch["wav"].to(device)            # (B, T)
             wav_lengths = batch["wav_lengths"]
             texts = batch["text"]                     # list[str]
@@ -145,11 +162,11 @@ def main():
             optimizer.zero_grad()
             scaler.scale(loss).backward()
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
             optimizer.step()
 
             if step % 1 == 0:
-                print(f"step {(step / len(train_loader)):.3f} | loss {(loss).item():.4f}")
+                print(f"epoch {(step / len(train_loader)):.3f} | total step {step} | loss {(loss).item():.4f}")
 
             if step % cfg["training"]["save_every"] == 0 and step > 0:
                 save_checkpoint(
@@ -161,13 +178,14 @@ def main():
 
             step += 1
         
-        print(f"epoch {epoch} | loss {loss.item():.4f}")
-        save_checkpoint(
-            model,
-            optimizer,
-            step,
-            outdir / f"ckpt_{step}.pt",
-        )
+        # if step >= current_step:
+        #     print(f"epoch {epoch} | loss {loss.item():.4f}")
+        #     save_checkpoint(
+        #         model,
+        #         optimizer,
+        #         step,
+        #         outdir / f"ckpt_{step}.pt",
+        #     )
 
 
 if __name__ == "__main__":

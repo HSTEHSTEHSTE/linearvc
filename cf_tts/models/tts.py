@@ -420,12 +420,16 @@ class ZipVoice(nn.Module):
             )
         batch_size, num_frames, _ = text_condition.shape
 
-        speech_condition = torch.nn.functional.pad(
-            prompt_features, (0, 0, 0, num_frames - prompt_features.size(1))
-        )  # (B, T, F)
+        if prompt_features.shape[2] > 0:
+            speech_condition = torch.nn.functional.pad(
+                prompt_features, (0, 0, 0, num_frames - prompt_features.size(1))
+            )  # (B, T, F)
+        else:
+            speech_condition = torch.zeros([batch_size, num_frames, self.feat_dim])
 
         # False means speech condition positions.
         speech_condition_mask = make_pad_mask(prompt_features_lens, num_frames)
+        speech_condition = speech_condition.to(speech_condition_mask.device)
         speech_condition = torch.where(
             speech_condition_mask.unsqueeze(-1),
             torch.zeros_like(speech_condition),
@@ -435,7 +439,7 @@ class ZipVoice(nn.Module):
         x0 = torch.randn(
             batch_size,
             num_frames,
-            prompt_features.size(-1),
+            self.feat_dim,
             device=text_condition.device,
         )
 
