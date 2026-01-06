@@ -10,6 +10,7 @@ import sentencepiece as spm
 from linearvc import linearvc
 from linearvc.cf_tts.dataset import TTSDataset, FrameBatchSampler, tts_collate
 from linearvc.cf_tts.models.tts import ZipVoice
+from linearvc.cf_tts.utils.common import create_grad_scaler
 
 
 # -------------------------
@@ -42,6 +43,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    print(cfg)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -75,6 +77,8 @@ def main():
         lr=cfg["optim"]["lr"],
         weight_decay=cfg["optim"]["weight_decay"]
     )
+
+    scaler = create_grad_scaler()
 
     sp = spm.SentencePieceProcessor()
     sp.load(cfg['training']['spm_file'])
@@ -122,29 +126,30 @@ def main():
             for text in texts:
                 text_ids.append(sp.encode_as_ids(text))
 
-            input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
-            input_features = torch.matmul(input_features, transform)
+            with torch.no_grad():
+                input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
+                input_features = torch.matmul(input_features, transform) * cfg['training']['feature_scale']
 
-            wav_lengths = torch.floor(wav_lengths / 320).to(device)
+            wav_lengths = (torch.floor((wav_lengths - 400) / 320) + 1).to(device)
 
             # forward
-            outputs = model(
+            loss = model(
                 tokens=text_ids,
-                features=wav,
+                features=input_features,
                 features_lens=wav_lengths,
-
+                noise=cfg['training']['noise_scale'] * torch.randn_like(input_features).to(device), # Note: noise added to features. Not uniform random noise
+                t=torch.rand(input_features.shape[0], 1, 1, device=device),
+                condition_drop_ratio=cfg['training']['condition_drop_ratio']
             )
 
-            # assume model returns dict with loss
-            loss = outputs["loss"]
-
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-            if step % 50 == 0:
-                print(f"step {step} | loss {loss.item():.4f}")
+            if step % 1 == 0:
+                print(f"step {(step / len(train_loader)):.3f} | loss {(loss).item():.4f}")
 
             if step % cfg["training"]["save_every"] == 0 and step > 0:
                 save_checkpoint(
@@ -155,6 +160,14 @@ def main():
                 )
 
             step += 1
+        
+        print(f"epoch {epoch} | loss {loss.item():.4f}")
+        save_checkpoint(
+            model,
+            optimizer,
+            step,
+            outdir / f"ckpt_{step}.pt",
+        )
 
 
 if __name__ == "__main__":

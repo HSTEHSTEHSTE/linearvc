@@ -154,16 +154,16 @@ class FrameBatchSampler(Sampler):
         if self.config['training']['shuffle_batches']:
             random.seed(self.config['training']['random_seed'])
             random.shuffle(self.batches)
-        self.batches = iter(self.batches)
 
 
     def __iter__(self):
-        yield next(self.batches)
+        for batch in self.batches:
+            yield batch
         
 
     def __len__(self):
         # PyTorch allows this to be approximate
-        return len(self.indices)
+        return len(self.batches)
 
 
 # -------------------------
@@ -202,5 +202,5 @@ if __name__ == "__main__":
     # test sampler
     sampler = FrameBatchSampler(dataset, config_file_path='cf_tts/config/config.yaml')
     print(len(sampler))
-    for i in range(5):
-        print(next(iter(sampler)))
+    for batch in sampler:
+        print(batch)

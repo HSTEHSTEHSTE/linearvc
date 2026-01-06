@@ -295,8 +295,8 @@ def get_tokens_index(durations: List[List[int]], num_frames: int) -> torch.Tenso
         this_dur = durations[b]
         cur_frame = 0
         for i, d in enumerate(this_dur):
-            ans[b, cur_frame : cur_frame + d] = i
-            cur_frame += d
+            ans[b, cur_frame : cur_frame + d.int().item()] = i
+            cur_frame += d.int().item()
         assert cur_frame == num_frames, (cur_frame, num_frames)
     return ans
 
