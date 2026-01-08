@@ -668,3 +668,25 @@ def get_parameter_groups_with_lrs(
         return [{"named_params": pairs, "lr": lr} for lr, pairs in lr_to_params.items()]
     else:
         return [{"params": params, "lr": lr} for lr, params in lr_to_params.items()]
+
+
+def normalize_input(features):
+    log10 = torch.log10(features)
+    log10_neg = -torch.log10(-features)
+    scaled_10 = torch.div(features, 10)
+    normalized_features = features.clone()
+    normalized_features = torch.where(features > 10., log10, normalized_features)
+    normalized_features = torch.where(torch.logical_and(features <= 10., features >= -10.), scaled_10, normalized_features)
+    normalized_features = torch.where(features < -10., log10_neg, normalized_features)
+    return normalized_features
+
+
+def invert_normalized_input(normalized_features):
+    exp_10_neg = -torch.pow(10., -normalized_features)
+    multiplied_10 = normalized_features * 10.
+    exp_10 = torch.pow(10., normalized_features)
+    features = normalized_features.clone()
+    features = torch.where(normalized_features < -1., exp_10_neg, features)
+    features = torch.where(torch.logical_and(normalized_features >= -1., normalized_features <= 1.), multiplied_10, features)
+    features = torch.where(normalized_features > 1., exp_10, features)
+    return features

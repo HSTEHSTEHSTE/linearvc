@@ -1178,13 +1178,29 @@ def SwooshLForward(x: Tensor):
         return log_sum - 0.08 * x - 0.035
 
 
+# gradient debug hooks
+def backward_hook_nans(grad):
+    if torch.isnan(grad).any():
+        breakpoint()
+
+
+# gradient debug hooks
+def backward_hook_zeroes(grad):
+    print(grad)
+    print(grad.abs().max())
+    if torch.isclose(grad, torch.zeros(grad.shape).to(grad.device)).any():
+        breakpoint()
+
+
 # simple version of SwooshR that does not redefine the backprop, used in
 # ActivationDropoutAndLinearFunction.
 def SwooshRForward(x: Tensor):
     with torch.amp.autocast("cuda", enabled=False):
         x = x.to(torch.float32)
         x_offset = x - 1.0
-        log_sum = (1.0 + x_offset.exp()).log().to(x.dtype)
+        exp = x_offset.exp()
+        sum_exp = 1.0 + exp
+        log_sum = sum_exp.log().to(x.dtype)
         log_sum = torch.where(log_sum == float("inf"), x_offset, log_sum)
         return log_sum - 0.08 * x - 0.313261687
 

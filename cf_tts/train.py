@@ -1,16 +1,18 @@
-import argparse
+import argparse, math
 from pathlib import Path
 import yaml
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from torch.autograd import detect_anomaly
 
 import sentencepiece as spm
+import time, datetime
 from linearvc import linearvc
 from linearvc.cf_tts.dataset import TTSDataset, FrameBatchSampler, tts_collate
 from linearvc.cf_tts.models.tts import ZipVoice
-from linearvc.cf_tts.utils.common import create_grad_scaler
+from linearvc.cf_tts.utils.common import create_grad_scaler, normalize_input
 
 
 # -------------------------
@@ -32,10 +34,15 @@ def save_checkpoint(model, optimizer, step, path):
         path,
     )
 
-def load_checkpoint(model, path, device):
+def load_checkpoint(model, optimizer, path, device):
     ckpt = torch.load(path, map_location=device)
     model.load_state_dict(ckpt["model"])
+    optimizer.load_state_dict(ckpt["optimizer"])
     return ckpt["step"]
+
+def format_time(start_time, end_time):
+    td = datetime.timedelta(seconds=(end_time - start_time))
+    return str(td)
 
 # -------------------------
 # main
@@ -48,7 +55,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    print(cfg)
+    print(cfg, flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -76,17 +83,19 @@ def main():
     model = ZipVoice(
         **cfg["model"]["tts"]["zipvoice"]
     ).to(device)
-    if args.checkpoint_path is not None:
-        current_step = load_checkpoint(model, args.checkpoint_path, device)
-    else:
-        current_step = 0
-    current_epoch = current_step / len(train_loader)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg["optim"]["lr"],
         weight_decay=cfg["optim"]["weight_decay"]
     )
+
+    if args.checkpoint_path is not None:
+        current_step = load_checkpoint(model, optimizer, args.checkpoint_path, device)
+        current_epoch = math.floor((current_step) / len(train_loader))
+    else:
+        current_step = -1
+        current_epoch = 0
 
     scaler = create_grad_scaler()
 
@@ -120,19 +129,22 @@ def main():
     outdir = Path(cfg["training"]["out_dir"])
     outdir.mkdir(parents=True, exist_ok=True)
 
-    step = 0
+    step = current_epoch * len(train_loader)
     model.train()
+    start_time = time.time()
 
     for epoch in range(cfg["training"]["epochs"]):
+        losses = []
         if epoch < current_epoch:
             continue
 
-        print(f"\nEpoch {epoch}")
+        print(f"\nEpoch {epoch}", flush=True)
 
         for batch_index, batch in enumerate(train_loader):
-            if step < (current_step - current_epoch * len(train_loader)):
+            if step < current_step:
+                step += 1
                 continue
-            if batch_index > 0:
+            if cfg['training']['epoch_batch_limit'] > 0 and batch_index >= cfg['training']['epoch_batch_limit']:
                 break
             wavs = batch["wav"].to(device)            # (B, T)
             wav_lengths = batch["wav_lengths"]
@@ -145,11 +157,14 @@ def main():
 
             with torch.no_grad():
                 input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
-                input_features = torch.matmul(input_features, transform) * cfg['training']['feature_scale']
+                input_features = torch.matmul(input_features, transform) # * cfg['training']['feature_scale']
+                input_features = normalize_input(input_features)
+                input_features = input_features.detach()
 
             wav_lengths = (torch.floor((wav_lengths - 400) / 320) + 1).to(device)
 
             # forward
+            torch.manual_seed(step)
             loss = model(
                 tokens=text_ids,
                 features=input_features,
@@ -160,32 +175,41 @@ def main():
             )
 
             optimizer.zero_grad()
-            scaler.scale(loss).backward()
+            if cfg['training']['use_grad_scaler']:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+            if (list(model.parameters())[0].grad.isnan().any()):
+                breakpoint()
+            losses.append(loss.item())
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['training']['clip_grad_norm'])
             optimizer.step()
 
-            if step % 1 == 0:
-                print(f"epoch {(step / len(train_loader)):.3f} | total step {step} | loss {(loss).item():.4f}")
+            if step % cfg['training']['log_every'] == 0:
+                current_time = time.time()
+                print(f"epoch {(step / len(train_loader)):.3f} | time elapsed {format_time(start_time, current_time)} | total step {step} | loss {(loss).item():.4f}", flush=True)
+
+            step += 1
 
             if step % cfg["training"]["save_every"] == 0 and step > 0:
                 save_checkpoint(
                     model,
                     optimizer,
                     step,
-                    outdir / f"ckpt_{step}.pt",
+                    outdir / f"ckpt_loss_{(loss).item():.2f}_step_{step}.pt",
                 )
 
-            step += 1
         
-        # if step >= current_step:
-        #     print(f"epoch {epoch} | loss {loss.item():.4f}")
-        #     save_checkpoint(
-        #         model,
-        #         optimizer,
-        #         step,
-        #         outdir / f"ckpt_{step}.pt",
-        #     )
+        current_time = time.time()
+        print(f"epoch {epoch} | time elapsed {format_time(start_time, current_time)} | avg loss {(sum(losses) / len(losses)):.4f}")
+        save_checkpoint(
+            model,
+            optimizer,
+            step,
+            outdir / f"ckpt_loss_{(sum(losses) / len(losses)):.2f}_epoch_{epoch}.pt",
+        )
 
 
 if __name__ == "__main__":
