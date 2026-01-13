@@ -686,6 +686,8 @@ class Zipformer2Encoder(nn.Module):
         )
         self.num_layers = num_layers
 
+        self.final_layer_norm = nn.BatchNorm1d(self.layers[-1].embed_dim)
+
         assert 0 <= warmup_begin <= warmup_end
 
         delta = (1.0 / num_layers) * (warmup_end - warmup_begin)
@@ -740,6 +742,8 @@ class Zipformer2Encoder(nn.Module):
                 attn_mask=attn_mask,
                 src_key_padding_mask=src_key_padding_mask,
             )
+
+        output = self.final_layer_norm(output.transpose(-1, -2)).transpose(-1, -2)
 
         return output
 
@@ -1411,6 +1415,7 @@ class FeedforwardModule(nn.Module):
             min_abs=0.75,
             max_abs=5.0,
         )
+        self.activation_norm = nn.BatchNorm1d(feedforward_dim)
 
         # shared_dim=0 means we share the dropout mask along the time axis
         self.out_proj = ActivationDropoutAndLinear(
@@ -1434,6 +1439,7 @@ class FeedforwardModule(nn.Module):
         x = self.in_proj(x)
         x = self.hidden_balancer(x)
         # out_proj contains SwooshL activation, then dropout, then linear.
+        x = self.activation_norm(x.transpose(-1, -2)).transpose(-1, -2)
         x = self.out_proj(x)
         x = self.out_whiten(x)
         return x
@@ -1627,6 +1633,8 @@ class ConvolutionModule(nn.Module):
             grad_scale=0.01,
         )
 
+        self.activation_norm = nn.BatchNorm1d(channels)
+
         self.out_proj = ActivationDropoutAndLinear(
             bottleneck_dim,
             channels,
@@ -1675,6 +1683,7 @@ class ConvolutionModule(nn.Module):
         x = x.permute(2, 0, 1)  # (time, batch, channels)
 
         x = self.whiten(x)  # (time, batch, channels)
+        x = self.activation_norm(x.transpose(-1, -2)).transpose(-1, -2)
         x = self.out_proj(x)  # (time, batch, channels)
 
         return x

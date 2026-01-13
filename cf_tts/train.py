@@ -1,4 +1,4 @@
-import argparse, math
+import argparse, math, shutil
 from pathlib import Path
 import yaml
 
@@ -12,7 +12,7 @@ import time, datetime
 from linearvc import linearvc
 from linearvc.cf_tts.dataset import TTSDataset, FrameBatchSampler, tts_collate
 from linearvc.cf_tts.models.tts import ZipVoice
-from linearvc.cf_tts.utils.common import create_grad_scaler, normalize_input
+from linearvc.cf_tts.utils.common import create_grad_scaler, normalize_input, manage_checkpoints
 
 
 # -------------------------
@@ -24,7 +24,7 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
-def save_checkpoint(model, optimizer, step, path):
+def save_checkpoint(model, optimizer, step, path, outdir, cfg):
     torch.save(
         {
             "model": model.state_dict(),
@@ -33,6 +33,7 @@ def save_checkpoint(model, optimizer, step, path):
         },
         path,
     )
+    ckpt_logs = manage_checkpoints(outdir, keep_loss=cfg['training']['num_ckpt_best_loss'], keep_epoch=cfg['training']['num_ckpt_latest_epochs'], keep_step=cfg['training']['num_ckpt_latest_steps'])
 
 def load_checkpoint(model, optimizer, path, device):
     ckpt = torch.load(path, map_location=device)
@@ -51,7 +52,7 @@ def format_time(start_time, end_time):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--checkpoint_path", default=None)
+    parser.add_argument("--checkpoint_path", default='')
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -63,7 +64,13 @@ def main():
     # dataset
     # -------------------------
 
-    train_set = TTSDataset(args.config)
+    if cfg['data']['load_path'] is not None:
+        import pickle
+        with open(cfg['data']['load_path'], 'rb') as file:
+            train_data_list = pickle.load(file)['data']
+        train_set = TTSDataset(config_file_path=args.config, data=train_data_list)
+    else:
+        train_set = TTSDataset(config_file_path=args.config)
     sampler = FrameBatchSampler(train_set, args.config)
 
     # since your dataset is already sorted by length,
@@ -90,9 +97,14 @@ def main():
         weight_decay=cfg["optim"]["weight_decay"]
     )
 
-    if args.checkpoint_path is not None:
+    if cfg['training']['epoch_batch_limit'] > 0:
+        epoch_batch_length = min(len(train_loader), cfg['training']['epoch_batch_limit'])
+    else:
+        epoch_batch_length = len(train_loader)
+
+    if args.checkpoint_path is not None and args.checkpoint_path != 'none':
         current_step = load_checkpoint(model, optimizer, args.checkpoint_path, device)
-        current_epoch = math.floor((current_step) / len(train_loader))
+        current_epoch = math.floor((current_step) / epoch_batch_length)
     else:
         current_step = -1
         current_epoch = 0
@@ -127,9 +139,12 @@ def main():
     # -------------------------
 
     outdir = Path(cfg["training"]["out_dir"])
-    outdir.mkdir(parents=True, exist_ok=True)
+    if not (outdir / 'cfg' / Path(args.config).name).is_file():
+        outdir.mkdir(parents=True, exist_ok=True)
+        (outdir / 'cfg').mkdir(parents=True, exist_ok=True)
+        shutil.copy2(args.config, outdir / 'cfg')
 
-    step = current_epoch * len(train_loader)
+    step = current_epoch * epoch_batch_length
     model.train()
     start_time = time.time()
 
@@ -157,8 +172,9 @@ def main():
 
             with torch.no_grad():
                 input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
-                input_features = torch.matmul(input_features, transform) # * cfg['training']['feature_scale']
-                input_features = normalize_input(input_features)
+                input_features = torch.matmul(input_features, transform) * cfg['training']['feature_scale']
+                if cfg['training']['normalize_input']:
+                    input_features = normalize_input(input_features)
                 input_features = input_features.detach()
 
             wav_lengths = (torch.floor((wav_lengths - 400) / 320) + 1).to(device)
@@ -193,23 +209,28 @@ def main():
 
             step += 1
 
-            if step % cfg["training"]["save_every"] == 0 and step > 0:
+            if step % cfg["training"]["save_every_steps"] == 0 and step > 0:
                 save_checkpoint(
                     model,
                     optimizer,
                     step,
                     outdir / f"ckpt_loss_{(loss).item():.2f}_step_{step}.pt",
+                    outdir,
+                    cfg
                 )
 
         
         current_time = time.time()
         print(f"epoch {epoch} | time elapsed {format_time(start_time, current_time)} | avg loss {(sum(losses) / len(losses)):.4f}")
-        save_checkpoint(
-            model,
-            optimizer,
-            step,
-            outdir / f"ckpt_loss_{(sum(losses) / len(losses)):.2f}_epoch_{epoch}.pt",
-        )
+        if epoch % cfg["training"]["save_every_epochs"] == 0 and step > 0:
+            save_checkpoint(
+                model,
+                optimizer,
+                step,
+                outdir / f"ckpt_loss_{(sum(losses) / len(losses)):.2f}_epoch_{epoch}.pt",
+                outdir,
+                cfg
+            )
 
 
 if __name__ == "__main__":

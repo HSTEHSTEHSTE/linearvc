@@ -108,7 +108,9 @@ def main():
 
     print("Running HiFiGAN...")
     with torch.no_grad():
-        out_feats = invert_normalized_input(out_feats)
+        if cfg['training']['normalize_input']:
+            out_feats = invert_normalized_input(out_feats)
+        out_feats = out_feats / cfg['training']['feature_scale']
         audio = linearvc_model.hifigan(torch.matmul(out_feats, transform_tgt))
 
     audio = audio.squeeze().cpu()

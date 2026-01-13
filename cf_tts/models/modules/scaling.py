@@ -1185,11 +1185,15 @@ def backward_hook_nans(grad):
 
 
 # gradient debug hooks
-def backward_hook_zeroes(grad):
-    print(grad)
-    print(grad.abs().max())
-    if torch.isclose(grad, torch.zeros(grad.shape).to(grad.device)).any():
+def backward_hook_zeros(grad):
+    # print(grad)
+    if torch.isnan(torch.exp(-grad)).any():
         breakpoint()
+
+
+def backward_hook_prev(grad):
+    if grad.shape[0] == 278:
+        print(grad[267, 15, 460])
 
 
 # simple version of SwooshR that does not redefine the backprop, used in

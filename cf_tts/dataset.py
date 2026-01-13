@@ -43,38 +43,43 @@ class TTSDataset(Dataset):
     def __init__(
         self,
         config_file_path: str,
+        data: list[TTSDatum] = None,
     ):
-        self.data: List[TTSDatum] = []
-
         # read config
         with open(config_file_path, 'r') as config_file:
             self.config = yaml.safe_load(config_file)
 
-        # load data
-        print("Reading Data")
-        for subset in self.config['data']['librispeech_subsets']:
-            print("Processing ", subset)
-            transcript_files = list((Path(self.config['data']['librispeech_transcript_path']) / subset).glob('*.txt'))
-            spks = []
-            for transcript_file in tqdm(transcript_files):
-                spk = transcript_file.stem
-                spks.append(spk)
-                with open(transcript_file, 'r') as file:
-                    for line in file:
-                        line = line.strip().split('|')
-                        text = line[1].strip()
-                        filename = line[0].strip()
-                        filename_elements = filename.split('-')
-                        wav_path = Path(self.config['data']['librispeech_audio_path']) / subset / spk / filename_elements[1] / (filename + '.flac')
-                        num_frames = torchaudio.info(wav_path).num_frames
-                        self.data.append(TTSDatum(
-                            wav_path=wav_path,
-                            text=text,
-                            speaker_id=spk,
-                            num_frames=num_frames
-                        ))
-        
-        self.data.sort(key=lambda x: x.num_frames)
+        if data is not None:
+            self.data = data
+
+        else:
+            self.data: List[TTSDatum] = []
+
+            # load data
+            print("Reading Data")
+            for subset in self.config['data']['librispeech_subsets']:
+                print("Processing ", subset)
+                transcript_files = list((Path(self.config['data']['librispeech_transcript_path']) / subset).glob('*.txt'))
+                spks = []
+                for transcript_file in tqdm(transcript_files):
+                    spk = transcript_file.stem
+                    spks.append(spk)
+                    with open(transcript_file, 'r') as file:
+                        for line in file:
+                            line = line.strip().split('|')
+                            text = line[1].strip()
+                            filename = line[0].strip()
+                            filename_elements = filename.split('-')
+                            wav_path = Path(self.config['data']['librispeech_audio_path']) / subset / spk / filename_elements[1] / (filename + '.flac')
+                            num_frames = torchaudio.info(wav_path).num_frames
+                            self.data.append(TTSDatum(
+                                wav_path=wav_path,
+                                text=text,
+                                speaker_id=spk,
+                                num_frames=num_frames
+                            ))
+            
+            self.data.sort(key=lambda x: x.num_frames)
 
     # -------------------------
     # torch dataset
