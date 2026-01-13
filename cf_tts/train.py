@@ -1,6 +1,6 @@
 import argparse, math, shutil
 from pathlib import Path
-import yaml
+import yaml, wandb
 
 import numpy as np
 import torch
@@ -103,6 +103,13 @@ def main():
     print(cfg, flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    wandb.login()
+    wandb.init(
+        project=cfg['training']['project_name'],
+        name=cfg['training']['run_name'],
+        id=cfg['training']['run_name']
+    )
 
     # -------------------------
     # dataset
@@ -265,6 +272,12 @@ def main():
             if step % cfg['training']['log_every'] == 0:
                 current_time = time.time()
                 print(f"epoch {(step / epoch_batch_length):.3f} | time elapsed {format_time(start_time, current_time)} | total step {step} | loss {(loss).item():.4f}", flush=True)
+                wandb.log(
+                    data = {
+                        "train_loss": loss.item(),
+                    },
+                    step = step
+                )
 
             step += 1
 
@@ -279,6 +292,12 @@ def main():
                     device, 
                     step, 
                     epoch_batch_length
+                )
+                wandb.log(
+                    data = {
+                        "validation_loss": validation_loss,
+                    },
+                    step = step
                 )
                 save_checkpoint(
                     model,
@@ -303,6 +322,12 @@ def main():
                 device, 
                 step, 
                 epoch_batch_length
+            )
+            wandb.log(
+                data = {
+                    "validation_loss": validation_loss,
+                },
+                step = step
             )
             save_checkpoint(
                 model,

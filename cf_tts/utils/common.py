@@ -128,24 +128,6 @@ class MetricsTracker(collections.defaultdict):
         for k, v in zip(keys, s.cpu().tolist()):
             self[k] = v
 
-    # todo: implement write summary on wandb
-    # def write_summary(
-    #     self,
-    #     tb_writer: SummaryWriter,
-    #     prefix: str,
-    #     batch_idx: int,
-    # ) -> None:
-    #     """Add logging information to a TensorBoard writer.
-
-    #     Args:
-    #         tb_writer: a TensorBoard writer
-    #         prefix: a prefix for the name of the loss, e.g. "train/valid_",
-    #             or "train/current_"
-    #         batch_idx: The current batch index, used as the x-axis of the plot.
-    #     """
-    #     for k, v in self.norm_items():
-    #         tb_writer.add_scalar(prefix + k, v, batch_idx)
-
 
 @contextmanager
 def torch_autocast(device_type="cuda", **kwargs):
