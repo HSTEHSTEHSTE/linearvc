@@ -43,6 +43,7 @@ class TTSDataset(Dataset):
     def __init__(
         self,
         config_file_path: str,
+        split: str = 'train', # train, dev, test
         data: list[TTSDatum] = None,
     ):
         # read config
@@ -57,7 +58,7 @@ class TTSDataset(Dataset):
 
             # load data
             print("Reading Data")
-            for subset in self.config['data']['librispeech_subsets']:
+            for subset in self.config['data'][split]['librispeech_subsets']:
                 print("Processing ", subset)
                 transcript_files = list((Path(self.config['data']['librispeech_transcript_path']) / subset).glob('*.txt'))
                 spks = []
@@ -121,6 +122,7 @@ class FrameBatchSampler(Sampler):
         self,
         dataset,
         config_file_path: str,
+        split: str = 'train'
     ):
         self.dataset = dataset
 
@@ -156,7 +158,7 @@ class FrameBatchSampler(Sampler):
 
         if batch:
             self.batches.append(batch)
-        if self.config['training']['shuffle_batches']:
+        if self.config['data'][split]['shuffle_batches']:
             random.seed(self.config['training']['random_seed'])
             random.shuffle(self.batches)
 

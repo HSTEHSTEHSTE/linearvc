@@ -45,6 +45,50 @@ def format_time(start_time, end_time):
     td = datetime.timedelta(seconds=(end_time - start_time))
     return str(td)
 
+def validation_pass(dev_loader, sp, linearvc_model, transform, cfg, model, device, step, epoch_batch_length):
+    model.eval()
+
+    total_loss = 0.
+    total = 0
+    for batch_index, batch in enumerate(dev_loader):
+        if cfg['data']['dev']['epoch_batch_limit'] > 0 and batch_index >= cfg['data']['dev']['epoch_batch_limit']:
+            break
+        wavs = batch["wav"].to(device)            # (B, T)
+        wav_lengths = batch["wav_lengths"]
+        texts = batch["text"]                     # list[str]
+        speakers = batch["speaker"]               # list[str]
+
+        text_ids = []
+        for text in texts:
+            text_ids.append(sp.encode_as_ids(text))
+
+        with torch.no_grad():
+            input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
+            input_features = torch.matmul(input_features, transform) * cfg['training']['feature_scale']
+            if cfg['training']['normalize_input']:
+                input_features = normalize_input(input_features)
+            input_features = input_features.detach()
+
+            wav_lengths = (torch.floor((wav_lengths - 400) / 320) + 1).to(device)
+
+            # forward
+            loss = model(
+                tokens=text_ids,
+                features=input_features,
+                features_lens=wav_lengths,
+                noise=cfg['training']['noise_scale'] * torch.randn_like(input_features).to(device), # Note: noise added to features. Not uniform random noise
+                t=torch.rand(input_features.shape[0], 1, 1, device=device),
+                condition_drop_ratio=cfg['training']['condition_drop_ratio']
+            )
+
+        total_loss += loss.item()
+        total += 1
+
+    print("Validation")
+    print(f"epoch {(step / epoch_batch_length):.3f} | total step {step} | val loss {(total_loss / total):.4f}", flush=True)
+    model.train()
+    return total_loss / total
+
 # -------------------------
 # main
 # -------------------------
@@ -64,20 +108,35 @@ def main():
     # dataset
     # -------------------------
 
-    if cfg['data']['load_path'] is not None:
+    if cfg['data']['train']['load_path'] is not None:
         import pickle
-        with open(cfg['data']['load_path'], 'rb') as file:
-            train_data_list = pickle.load(file)['data']
-        train_set = TTSDataset(config_file_path=args.config, data=train_data_list)
+        with open(cfg['data']['train']['load_path'], 'rb') as file:
+            data_list = pickle.load(file)['data']
+        train_set = TTSDataset(config_file_path=args.config, split='train', data=data_list)
     else:
-        train_set = TTSDataset(config_file_path=args.config)
-    sampler = FrameBatchSampler(train_set, args.config)
+        train_set = TTSDataset(config_file_path=args.config, split='train')
+    train_sampler = FrameBatchSampler(train_set, args.config, split='train')
 
-    # since your dataset is already sorted by length,
-    # do NOT shuffle here
+    if cfg['data']['dev']['load_path'] is not None:
+        import pickle
+        with open(cfg['data']['dev']['load_path'], 'rb') as file:
+            data_list = pickle.load(file)['data']
+        dev_set = TTSDataset(config_file_path=args.config, split='dev', data=data_list)
+    else:
+        dev_set = TTSDataset(config_file_path=args.config, split='dev')
+    dev_sampler = FrameBatchSampler(dev_set, args.config, split='dev')
+    
+
     train_loader = DataLoader(
         train_set,
-        batch_sampler=sampler,
+        batch_sampler=train_sampler,
+        collate_fn=tts_collate,
+        num_workers=cfg['training']['num_workers'],
+        pin_memory=True,
+    )
+    dev_loader = DataLoader(
+        dev_set,
+        batch_sampler=dev_sampler,
         collate_fn=tts_collate,
         num_workers=cfg['training']['num_workers'],
         pin_memory=True,
@@ -97,8 +156,8 @@ def main():
         weight_decay=cfg["optim"]["weight_decay"]
     )
 
-    if cfg['training']['epoch_batch_limit'] > 0:
-        epoch_batch_length = min(len(train_loader), cfg['training']['epoch_batch_limit'])
+    if cfg['data']['train']['epoch_batch_limit'] > 0:
+        epoch_batch_length = min(len(train_loader), cfg['data']['train']['epoch_batch_limit'])
     else:
         epoch_batch_length = len(train_loader)
 
@@ -159,7 +218,7 @@ def main():
             if step < current_step:
                 step += 1
                 continue
-            if cfg['training']['epoch_batch_limit'] > 0 and batch_index >= cfg['training']['epoch_batch_limit']:
+            if cfg['data']['train']['epoch_batch_limit'] > 0 and batch_index >= cfg['data']['train']['epoch_batch_limit']:
                 break
             wavs = batch["wav"].to(device)            # (B, T)
             wav_lengths = batch["wav_lengths"]
@@ -205,16 +264,27 @@ def main():
 
             if step % cfg['training']['log_every'] == 0:
                 current_time = time.time()
-                print(f"epoch {(step / len(train_loader)):.3f} | time elapsed {format_time(start_time, current_time)} | total step {step} | loss {(loss).item():.4f}", flush=True)
+                print(f"epoch {(step / epoch_batch_length):.3f} | time elapsed {format_time(start_time, current_time)} | total step {step} | loss {(loss).item():.4f}", flush=True)
 
             step += 1
 
             if step % cfg["training"]["save_every_steps"] == 0 and step > 0:
+                validation_loss = validation_pass(
+                    dev_loader, 
+                    sp, 
+                    linearvc_model, 
+                    transform, 
+                    cfg, 
+                    model, 
+                    device, 
+                    step, 
+                    epoch_batch_length
+                )
                 save_checkpoint(
                     model,
                     optimizer,
                     step,
-                    outdir / f"ckpt_loss_{(loss).item():.2f}_step_{step}.pt",
+                    outdir / f"ckpt_loss_{validation_loss:.2f}_step_{step}.pt",
                     outdir,
                     cfg
                 )
@@ -223,11 +293,22 @@ def main():
         current_time = time.time()
         print(f"epoch {epoch} | time elapsed {format_time(start_time, current_time)} | avg loss {(sum(losses) / len(losses)):.4f}")
         if epoch % cfg["training"]["save_every_epochs"] == 0 and step > 0:
+            validation_loss = validation_pass(
+                dev_loader, 
+                sp, 
+                linearvc_model, 
+                transform, 
+                cfg, 
+                model, 
+                device, 
+                step, 
+                epoch_batch_length
+            )
             save_checkpoint(
                 model,
                 optimizer,
                 step,
-                outdir / f"ckpt_loss_{(sum(losses) / len(losses)):.2f}_epoch_{epoch}.pt",
+                outdir / f"ckpt_loss_{validation_loss:.2f}_epoch_{epoch}.pt",
                 outdir,
                 cfg
             )
