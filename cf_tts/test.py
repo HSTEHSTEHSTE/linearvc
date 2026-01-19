@@ -4,7 +4,6 @@ import yaml
 import numpy as np
 import torch
 import torchaudio
-import sentencepiece as spm
 
 from linearvc import linearvc
 from linearvc.cf_tts.models.tts import ZipVoice
@@ -52,10 +51,6 @@ def main():
     load_checkpoint(model, args.checkpoint, device)
     model.eval()
 
-    print("Loading SentencePiece...")
-    sp = spm.SentencePieceProcessor()
-    sp.load(cfg["training"]["spm_file"])
-
     print("Loading WavLM + HiFiGAN...")
     wavlm = torch.hub.load(
         "bshall/knn-vc",
@@ -84,7 +79,24 @@ def main():
     # tokenize text
     # -------------------------
 
-    tokens = [sp.encode_as_ids(args.text)]
+    if cfg['training']['text_tokenizer']['type'] == 'spm':
+        import sentencepiece as spm
+        print("Loading SentencePiece...")
+        sp = spm.SentencePieceProcessor()
+        sp.load(cfg["training"]["spm_file"])
+        tokens = [sp.encode_as_ids(args.text)]
+    elif cfg['training']['text_tokenizer']['type'] == 'phone':
+        from speechbrain.inference.text import GraphemeToPhoneme
+        g2p = GraphemeToPhoneme.from_hparams("speechbrain/soundchoice-g2p", savedir="pretrained_models/soundchoice-g2p")
+        text = g2p(args.text)
+        import json
+        with open(cfg['training']['text_tokenizer']['tokenizer_file'], 'r') as phone_json_file:
+            phones = json.load(phone_json_file)['phonemes']
+            text_tokenizer = {}
+            for phone_id, phone in enumerate(phones):
+                text_tokenizer[phone] = phone_id
+        tokens = [[text_tokenizer[phone] for phone in text if phone in text_tokenizer]]
+        
 
     # -------------------------
     # flow matching sampling

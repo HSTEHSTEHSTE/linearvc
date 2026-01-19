@@ -339,7 +339,7 @@ class ZipVoice(nn.Module):
 
         speech_condition_mask = condition_time_mask(
             features_lens=features_lens,
-            mask_percent=(0.7, 1.0),
+            mask_percent=(1.0, 1.0),
             max_len=features.size(1),
         )
         speech_condition = torch.where(speech_condition_mask.unsqueeze(-1), 0, features)

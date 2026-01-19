@@ -7,7 +7,6 @@ import torch
 from torch.utils.data import DataLoader
 from torch.autograd import detect_anomaly
 
-import sentencepiece as spm
 import time, datetime
 from linearvc import linearvc
 from linearvc.cf_tts.dataset import TTSDataset, FrameBatchSampler, tts_collate
@@ -45,7 +44,7 @@ def format_time(start_time, end_time):
     td = datetime.timedelta(seconds=(end_time - start_time))
     return str(td)
 
-def validation_pass(dev_loader, sp, linearvc_model, transform, cfg, model, device, step, epoch_batch_length):
+def validation_pass(dev_loader, text_tokenizer, linearvc_model, transform, cfg, model, device, step, epoch_batch_length):
     model.eval()
 
     total_loss = 0.
@@ -60,7 +59,11 @@ def validation_pass(dev_loader, sp, linearvc_model, transform, cfg, model, devic
 
         text_ids = []
         for text in texts:
-            text_ids.append(sp.encode_as_ids(text))
+            if cfg['training']['text_tokenizer']['type'] == 'spm':
+                text_ids.append(text_tokenizer.encode_as_ids(text))
+            elif cfg['training']['text_tokenizer']['type'] == 'phone':
+                text = text.split(' ')
+                text_ids.append([text_tokenizer[phone] for phone in text if phone in text_tokenizer])
 
         with torch.no_grad():
             input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
@@ -108,19 +111,29 @@ def main():
     wandb.init(
         project=cfg['training']['project_name'],
         name=cfg['training']['run_name'],
-        id=cfg['training']['run_name']
+        id=cfg['training']['run_name'],
     )
 
     # -------------------------
     # dataset
     # -------------------------
 
+    load_path = None
     if cfg['data']['train']['load_path'] is not None:
         import pickle
-        with open(cfg['data']['train']['load_path'], 'rb') as file:
-            data_list = pickle.load(file)['data']
-        train_set = TTSDataset(config_file_path=args.config, split='train', data=data_list)
+        load_path = Path(cfg['data']['train']['load_path'])
+        if load_path.is_file():
+            print("Reading pre-processed data file", flush=True)
+            with open(load_path, 'rb') as file:
+                data_list = pickle.load(file)
+            train_set = TTSDataset(config_file_path=args.config, split='train', data=data_list)
+        else:
+            print("Pre-processing data and saving to load_path", flush=True)
+            train_set = TTSDataset(config_file_path=args.config, split='train')
+            with open(load_path, 'wb') as file:
+                pickle.dump(train_set.data, file)
     else:
+        print("Pre-processing data", flush=True)
         train_set = TTSDataset(config_file_path=args.config, split='train')
     train_sampler = FrameBatchSampler(train_set, args.config, split='train')
 
@@ -177,8 +190,17 @@ def main():
 
     scaler = create_grad_scaler()
 
-    sp = spm.SentencePieceProcessor()
-    sp.load(cfg['training']['spm_file'])
+    if cfg['training']['text_tokenizer']['type'] == 'spm':
+        import sentencepiece as spm
+        text_tokenizer = spm.SentencePieceProcessor()
+        text_tokenizer.load(cfg['training']['text_tokenizer']['tokenizer_file'])
+    elif cfg['training']['text_tokenizer']['type'] == 'phone':
+        import json
+        with open(cfg['training']['text_tokenizer']['tokenizer_file'], 'r') as phone_json_file:
+            phones = json.load(phone_json_file)['phonemes']
+            text_tokenizer = {}
+            for phone_id, phone in enumerate(phones):
+                text_tokenizer[phone] = phone_id
 
     wavlm = torch.hub.load(
         "bshall/knn-vc", 
@@ -234,7 +256,11 @@ def main():
 
             text_ids = []
             for text in texts:
-                text_ids.append(sp.encode_as_ids(text))
+                if cfg['training']['text_tokenizer']['type'] == 'spm':
+                    text_ids.append(text_tokenizer.encode_as_ids(text))
+                elif cfg['training']['text_tokenizer']['type'] == 'phone':
+                    text = text.split(' ')
+                    text_ids.append([text_tokenizer[phone] for phone in text if phone in text_tokenizer])
 
             with torch.no_grad():
                 input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
@@ -262,12 +288,11 @@ def main():
             else:
                 loss.backward()
 
-            if (list(model.parameters())[0].grad.isnan().any()):
-                breakpoint()
             losses.append(loss.item())
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['training']['clip_grad_norm'])
-            optimizer.step()
+            if not (list(model.parameters())[0].grad.isnan().any()):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['training']['clip_grad_norm'])
+                optimizer.step()
 
             if step % cfg['training']['log_every'] == 0:
                 current_time = time.time()
@@ -284,7 +309,7 @@ def main():
             if step % cfg["training"]["save_every_steps"] == 0 and step > 0:
                 validation_loss = validation_pass(
                     dev_loader, 
-                    sp, 
+                    text_tokenizer, 
                     linearvc_model, 
                     transform, 
                     cfg, 
@@ -314,7 +339,7 @@ def main():
         if epoch % cfg["training"]["save_every_epochs"] == 0 and step > 0:
             validation_loss = validation_pass(
                 dev_loader, 
-                sp, 
+                text_tokenizer, 
                 linearvc_model, 
                 transform, 
                 cfg, 

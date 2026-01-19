@@ -99,9 +99,9 @@ def main(args):
             input_features = linearvc_model.get_features(wav_src)
             input_features = input_features.cpu().numpy()
             if args.pinv_type == 'src':
-                out_features = torch.tensor(np.dot(0.002 * np.dot(input_features, np.linalg.pinv(transforms[spk_src])), transforms[spk_tgt])).to(device)
+                out_features = torch.tensor(np.dot(np.dot(input_features, np.linalg.pinv(transforms[spk_src])), transforms[spk_tgt])).to(device)
             else:
-                out_features = torch.tensor(np.dot(0.002 * np.dot(input_features, np.linalg.pinv(transforms[spk_anchor])), transforms[spk_tgt])).to(device)
+                out_features = torch.tensor(np.dot(np.dot(input_features, np.linalg.pinv(transforms[spk_anchor])), transforms[spk_tgt])).to(device)
             wav_hat = hifigan(out_features.unsqueeze(0)).squeeze(0).detach().cpu()
             (out_dir / spk_src).mkdir(parents=True, exist_ok=True)
             torchaudio.save(out_dir / spk_src / (wav_src.stem + '.wav'), wav_hat, 16000)
