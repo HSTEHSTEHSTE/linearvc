@@ -2,6 +2,7 @@
 import os
 import json, yaml
 import random
+import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional
@@ -46,6 +47,8 @@ class TTSDataset(Dataset):
         split: str = 'train', # train, dev, test
         data: list[TTSDatum] = None,
     ):
+        self.resamplers = {}
+
         # read config
         with open(config_file_path, 'r') as config_file:
             self.config = yaml.safe_load(config_file)
@@ -58,27 +61,40 @@ class TTSDataset(Dataset):
 
             # load data
             print("Reading Data")
-            for subset in self.config['data'][split]['librispeech_subsets']:
-                print("Processing ", subset)
-                transcript_files = list((Path(self.config['data']['librispeech_transcript_path']) / subset).glob('*.txt'))
-                spks = []
-                for transcript_file in tqdm(transcript_files):
-                    spk = transcript_file.stem
-                    spks.append(spk)
-                    with open(transcript_file, 'r') as file:
-                        for line in file:
-                            line = line.strip().split('|')
-                            text = line[1].strip()
-                            filename = line[0].strip()
-                            filename_elements = filename.split('-')
-                            wav_path = Path(self.config['data']['librispeech_audio_path']) / subset / spk / filename_elements[1] / (filename + '.flac')
-                            num_frames = torchaudio.info(wav_path).num_frames
-                            self.data.append(TTSDatum(
-                                wav_path=wav_path,
-                                text=text,
-                                speaker_id=spk,
-                                num_frames=num_frames
-                            ))
+            if self.config['data'][split]['dataset'] == 'librispeech':
+                for subset in self.config['data'][split]['librispeech_subsets']:
+                    print("Processing ", subset)
+                    transcript_files = list((Path(self.config['data']['librispeech_transcript_path']) / subset).glob('*.txt'))
+                    spks = []
+                    for transcript_file in tqdm(transcript_files):
+                        spk = transcript_file.stem
+                        spks.append(spk)
+                        with open(transcript_file, 'r') as file:
+                            for line in file:
+                                line = line.strip().split('|')
+                                text = line[1].strip()
+                                filename = line[0].strip()
+                                filename_elements = filename.split('-')
+                                wav_path = Path(self.config['data']['librispeech_audio_path']) / subset / spk / filename_elements[1] / (filename + '.flac')
+                                num_frames = torchaudio.info(wav_path).num_frames
+                                self.data.append(TTSDatum(
+                                    wav_path=wav_path,
+                                    text=text,
+                                    speaker_id=spk,
+                                    num_frames=num_frames
+                                ))
+            elif self.config['data'][split]['dataset'] == 'commonvoice':
+                audio_root = Path(self.config['data']['commonvoice_root_path']) / 'clips'
+                for subset_file in self.config['data'][split]['commonvoice_subsets']:
+                    print("Processing ", subset_file)
+                    subset_df = pd.read_csv(subset_file, sep=',', header=0, index_col=0)
+                    for entry in tqdm(subset_df.iterrows(), total=subset_df.shape[0]):
+                        self.data.append(TTSDatum(
+                            wav_path=audio_root / entry[1].path,
+                            text=entry[1]['sentence'],
+                            speaker_id=entry[1]['client_id'],
+                            num_frames=int(entry[1]['duration'] * 16000)
+                        ))
             
             self.data.sort(key=lambda x: x.num_frames)
 
@@ -92,7 +108,11 @@ class TTSDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
 
-        wav, sr = torchaudio.load(item.wav_path)
+        wav, sr = torchaudio.load(str(item.wav_path), backend='sox')
+        if sr != 16000:
+            if sr not in self.resamplers:
+                self.resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+            wav = self.resamplers[sr](wav)
 
         wav = wav.squeeze(0)
 

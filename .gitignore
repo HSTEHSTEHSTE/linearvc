@@ -4,6 +4,7 @@
 !*.py
 !*.pyx
 !*.yml
+!*.yaml
 !*.md
 !*.txt
 !*.ipynb

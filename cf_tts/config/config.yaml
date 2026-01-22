@@ -1,0 +1,128 @@
+# training
+training:
+  # Training parameters
+  project_name: LinearVC_CF-TTS
+  run_name: v0.1
+  epochs: 100000
+  num_workers: 16
+  max_frames_per_batch: 2800000 # 5 min
+  random_seed: 42
+  text_tokenizer:
+    type: phone  # spm, phone
+    # tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/m_8000.model
+    tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/phones.json
+  content_factorization_file: /home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/librispeech_dev-clean/rank_75/src_1272/transforms.npy
+  condition_drop_ratio: 0.0
+  noise_scale: 1.0
+  feature_scale: 0.1
+  normalize_input: true
+  sampling_steps: 16
+  clip_grad_norm: 1.0
+  use_grad_scaler: true
+  
+  # logging
+  log_every: 50
+
+  # Checkpoint managedment
+  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v0.0
+  save_every_steps: 1000
+  save_every_epochs: 1
+  num_ckpt_best_loss: 3
+  num_ckpt_latest_epochs: 3
+  num_ckpt_latest_steps: 3
+
+
+# optimizer and scheduler
+optim:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+
+
+# model specifications
+model:
+  tts:
+    zipvoice:
+      fm_decoder_downsampling_factor:
+        - 1
+        - 2
+        - 4
+        - 2
+        - 1
+
+      fm_decoder_num_layers:
+        - 2
+        - 2
+        - 4
+        - 4
+        - 4
+
+      fm_decoder_cnn_module_kernel:
+        - 31
+        - 15
+        - 7
+        - 15
+        - 31
+
+      fm_decoder_feedforward_dim: 1536
+      fm_decoder_num_heads: 4
+      fm_decoder_dim: 512
+
+      text_encoder_num_layers: 4
+      text_encoder_feedforward_dim: 512
+      text_encoder_cnn_module_kernel: 9
+      text_encoder_num_heads: 4
+      text_encoder_dim: 192
+
+      query_head_dim: 32
+      value_head_dim: 12
+      pos_head_dim: 4
+      pos_dim: 48
+
+      time_embed_dim: 192
+      text_embed_dim: 192
+
+      feat_dim: 75
+
+      vocab_size: 39
+      
+      min_ratio_min: 0.5
+      max_ratio_max: 1.0
+
+# data
+data:
+  train:
+    dataset: 'commonvoice' # librispeech, commonvoice
+    # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_phones.pkl
+    load_path: null
+    # librispeech_subsets:
+    #   - train-clean-100
+    #   - train-clean-360
+    #   - train-other-500
+    # librispeech_subsets:
+    #   - dev-clean
+    commonvoice_subsets:
+      - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/cv-dev.csv
+
+    epoch_batch_limit: -1
+    shuffle_batches: true
+  dev:
+    dataset: 'commonvoice' # librispeech, commonvoice
+    load_path: null
+    # librispeech_subsets:
+    #   - dev-clean
+    #   # - dev-other
+    commonvoice_subsets:
+      - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/cv-dev.csv
+    epoch_batch_limit: 100
+    shuffle_batches: true
+  # librispeech_audio_path: /home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech
+  # librispeech_transcript_path: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/orig_phones
+  commonvoice_root_path: /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/commonvoice/en
+
+  # Target sampling rate for all audio
+  sampling_rate: 16000
+  max_audio_len: 480000
+
+  # Whether to sort utterances by audio length before batching
+  # (helps with GPU efficiency and stable training)
+  sort_by_length: true
