@@ -21,6 +21,12 @@ def check_argv():
         type=Path,
         help="directory to store ASR output",
     )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default='librispeech',
+        help="dataset structure",
+    )
     return parser.parse_args()
 
 def main(args):
@@ -30,25 +36,40 @@ def main(args):
     out_transcript_dir = Path(args.out_transcript_dir)
     out_transcript_dir.mkdir(parents=True, exist_ok=True)
 
-    extensions = ['wav', 'flac']
-    spks_long = converted_dir.iterdir()
-    spks = []
-    for spk_long in spks_long:
-        spks.append(str(spk_long).split('/')[-1])
+    extensions = ['wav', 'flac', 'mp3']
 
     model = whisper.load_model('large', device="cuda")
 
-    for spk in tqdm(spks):
+    if args.dataset == 'librispeech':
+        spks_long = converted_dir.iterdir()
+        spks = []
+        for spk_long in spks_long:
+            spks.append(str(spk_long).split('/')[-1])
+        for spk in tqdm(spks):
+            wavs = []
+            transcripts = {}
+            for extension in extensions:
+                wavs += (converted_dir / spk).rglob('*.' + extension)
+
+            for wav in tqdm(wavs):
+                transcript = model.transcribe(str(wav), language="english")
+                transcripts[wav.stem] = transcript['text']
+
+            with open(out_transcript_dir / (spk + '.txt'), 'w') as out_transcript_file:
+                for transcript in transcripts:
+                    out_transcript_file.write(transcript + '|' + transcripts[transcript] + '\n')
+
+    elif args.dataset == 'commonvoice':
         wavs = []
         transcripts = {}
         for extension in extensions:
-            wavs += (converted_dir / spk).rglob('*.' + extension)
+            wavs += converted_dir.rglob('*.' + extension)
 
         for wav in tqdm(wavs):
             transcript = model.transcribe(str(wav), language="english")
             transcripts[wav.stem] = transcript['text']
 
-        with open(out_transcript_dir / (spk + '.txt'), 'w') as out_transcript_file:
+        with open(out_transcript_dir / ('out.txt'), 'w') as out_transcript_file:
             for transcript in transcripts:
                 out_transcript_file.write(transcript + '|' + transcripts[transcript] + '\n')
 

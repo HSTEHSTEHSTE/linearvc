@@ -201,6 +201,9 @@ def main():
             text_tokenizer = {}
             for phone_id, phone in enumerate(phones):
                 text_tokenizer[phone] = phone_id
+        if not cfg['training']['text_tokenizer']['pre_phonemized']:
+            from speechbrain.inference.text import GraphemeToPhoneme
+            g2p = GraphemeToPhoneme.from_hparams("speechbrain/soundchoice-g2p", savedir="pretrained_models/soundchoice-g2p").to(device)
 
     wavlm = torch.hub.load(
         "bshall/knn-vc", 
@@ -255,12 +258,18 @@ def main():
             speakers = batch["speaker"]               # list[str]
 
             text_ids = []
-            for text in texts:
-                if cfg['training']['text_tokenizer']['type'] == 'spm':
+            if cfg['training']['text_tokenizer']['type'] == 'spm':
+                for text in texts:
                     text_ids.append(text_tokenizer.encode_as_ids(text))
-                elif cfg['training']['text_tokenizer']['type'] == 'phone':
-                    text = text.split(' ')
-                    text_ids.append([text_tokenizer[phone] for phone in text if phone in text_tokenizer])
+            elif cfg['training']['text_tokenizer']['type'] == 'phone':
+                if cfg['training']['text_tokenizer']['pre_phonemized']:
+                    for text in texts:
+                        text = text.split(' ')
+                        text_ids.append([text_tokenizer[phone] for phone in text if phone in text_tokenizer])
+                else:
+                    phones = g2p(texts)
+                    for text in phones:
+                        text_ids.append([text_tokenizer[phone] for phone in text if phone in text_tokenizer])
 
             with torch.no_grad():
                 input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)

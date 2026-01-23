@@ -30,7 +30,7 @@ class LinearVC(nn.Module):
         self.sr = 16000
 
     @torch.inference_mode()
-    def get_features(self, wav_fn, vad=False):
+    def get_features(self, wav_fn, vad=False, max_frames=480000):
         """
         Return features of `wav_fn` as a tensor with shape (n_frames, dim).
 
@@ -45,8 +45,8 @@ class LinearVC(nn.Module):
                 wav,
                 orig_freq=sr,
                 new_freq=self.sr,
-                trigger_level=vad_trigger_level,
             )
+        wav = wav[:, :max_frames]
 
         # Trim silence at beginning (if specified)
         if vad:

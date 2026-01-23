@@ -110,7 +110,7 @@ def main():
             prompt_features=torch.tensor([[[]]], device=device),
             prompt_features_lens=torch.tensor([0], device=device),
             duration='real',
-            features_lens=torch.tensor([450], device=device),
+            features_lens=torch.tensor([500], device=device),
             num_step=int(args.sampling_steps)
         )[0]
 

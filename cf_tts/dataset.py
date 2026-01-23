@@ -76,7 +76,7 @@ class TTSDataset(Dataset):
                                 filename = line[0].strip()
                                 filename_elements = filename.split('-')
                                 wav_path = Path(self.config['data']['librispeech_audio_path']) / subset / spk / filename_elements[1] / (filename + '.flac')
-                                num_frames = torchaudio.info(wav_path).num_frames
+                                num_frames = torchaudio.info(wav_path, backend='soundfile').num_frames
                                 self.data.append(TTSDatum(
                                     wav_path=wav_path,
                                     text=text,
@@ -108,7 +108,10 @@ class TTSDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
 
-        wav, sr = torchaudio.load(str(item.wav_path), backend='sox')
+        if item.wav_path.suffix == '.mp3':
+            wav, sr = torchaudio.load(str(item.wav_path), backend='sox')
+        else:
+            wav, sr = torchaudio.load(item.wav_path, backend='soundfile')
         if sr != 16000:
             if sr not in self.resamplers:
                 self.resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)

@@ -11,13 +11,19 @@ def check_argv():
         type=Path,
         help="converted speech directory",
     )
+    parser.add_argument(
+        "--length_limit",
+        type=int,
+        default=-1,
+        help="number of wavs to evaluate",
+    )
     return parser.parse_args()
 
 def main(args):
     print("Converted dir: ", args.converted_dir)
     out_wav_path = Path(args.converted_dir)
 
-    extensions = ['wav', 'flac']
+    extensions = ['wav', 'flac', 'mp3']
     out_wavs = []
     for extension in extensions:
         out_wavs += out_wav_path.rglob('*.' + extension)
@@ -25,8 +31,10 @@ def main(args):
     model = utmosv2.create_model(pretrained=True)
     scores = []
 
-    for out_wav_path in tqdm(out_wavs):
-        out_wav, sr = torchaudio.load(out_wav_path)
+    for index, out_wav_path in tqdm(enumerate(out_wavs), total=len(out_wavs)):
+        if args.length_limit != -1 and index > args.length_limit:
+            break
+        out_wav, sr = torchaudio.load(str(out_wav_path), backend='sox')
         scores.append(model.predict(data=out_wav, sr=sr).item())
 
     print("UTMOS v2 score: ", sum(scores) / len(scores))
