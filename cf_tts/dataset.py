@@ -14,8 +14,7 @@ from torch.utils.data import Sampler
 
 class TTSDatum:
     """
-    One training example:
-      text → phonemes → acoustic features → speaker
+    One training example
     """
     def __init__(
         self,
@@ -32,13 +31,7 @@ class TTSDatum:
 
 class TTSDataset(Dataset):
     """
-    Generic TTS dataset used by CF-TTS.
-
-    Expected manifest format (jsonl or csv-like):
-        wav_path | text | speaker_id(optional)
-
-    Audio loading and feature extraction is kept here so
-    training code stays clean, meow 🐾
+    TTS dataset used by CF-TTS.
     """
 
     def __init__(
@@ -109,7 +102,7 @@ class TTSDataset(Dataset):
         item = self.data[idx]
 
         if item.wav_path.suffix == '.mp3':
-            wav, sr = torchaudio.load(str(item.wav_path), backend='sox')
+            wav, sr = torchaudio.load(item.wav_path, backend='ffmpeg')
         else:
             wav, sr = torchaudio.load(item.wav_path, backend='soundfile')
         if sr != 16000:
@@ -200,28 +193,76 @@ class FrameBatchSampler(Sampler):
 # batching
 # -------------------------
 
-def tts_collate(batch: List[Dict]):
+class TTS_Collate:
     """
     Pads variable-length audio and text for batching.
-    Text tokenization happens in the model.
     """
-    wavs = [b["wav"] for b in batch]
-    speakers = [b["speaker"] for b in batch]
-    texts = [b["text"] for b in batch]
+    def __init__(self, cfg):
+        self.tokenizer_type = cfg['data']['text_tokenizer']['type']
+        self.pre_phonemized = cfg['data']['text_tokenizer']['pre_phonemized']
+        if self.tokenizer_type == 'spm':
+            import sentencepiece as spm
+            self.text_tokenizer = spm.SentencePieceProcessor()
+            self.text_tokenizer.load(cfg['data']['text_tokenizer']['tokenizer_file'])
+        elif self.tokenizer_type == 'phone':
+            import json
+            with open(cfg['data']['text_tokenizer']['tokenizer_file'], 'r') as phone_json_file:
+                tokens = json.load(phone_json_file)
+                self.text_tokenizer = {}
+                punctuation_marks = ''
+                for category in tokens.keys():
+                    category_tokens = tokens[category]
+                    for token_id, token in enumerate(category_tokens):
+                        self.text_tokenizer[token] = token_id
+                        if category == 'punctuations':
+                            punctuation_marks += token
+            if not self.pre_phonemized:
+                from phonemizer.backend import EspeakBackend
+                from phonemizer.separator import Separator
+                self.separator = Separator(phone='-', word=' ')
+                backend = EspeakBackend(
+                    language='en-us', 
+                    preserve_punctuation=True, 
+                    punctuation_marks=punctuation_marks,
+                    words_mismatch='ignore'
+                )
+                self.phonemize = backend.phonemize
 
-    lengths = torch.tensor([w.size(0) for w in wavs])
-    max_len = max(lengths)
+    def __call__(self, batch: List[Dict]):
+        wavs = [b["wav"] for b in batch]
+        speakers = [b["speaker"] for b in batch]
+        texts_raw = [b["text"] for b in batch]
+        texts = []
+        if self.tokenizer_type == 'spm':
+            for text_raw in texts_raw:
+                texts.append(self.text_tokenizer.encode_as_ids(text_raw))
+        elif self.tokenizer_type == 'phone':
+            if self.pre_phonemized:
+                for text_raw in texts_raw:
+                    text_raw = text_raw.split(' ')
+                    texts.append([self.text_tokenizer[phone] for phone in text_raw if phone in self.text_tokenizer])
+            else:
+                phones = self.phonemize(texts_raw, separator=self.separator, strip=True)
+                phones = [phone.replace('- ', '-').replace(' ', '-').split('-') for phone in phones]
+                for text in phones:
+                    texts.append([self.text_tokenizer[token] for token in text if token in self.text_tokenizer])
+                    
 
-    padded = torch.zeros(len(wavs), max_len)
-    for i, w in enumerate(wavs):
-        padded[i, : w.size(0)] = w
+        lengths = torch.tensor([w.size(0) for w in wavs])
+        max_len = max(lengths)
 
-    return {
-        "wav": padded,
-        "wav_lengths": lengths,
-        "text": texts,
-        "speaker": speakers,
-    }
+        padded = torch.zeros(len(wavs), max_len)
+        for i, w in enumerate(wavs):
+            padded[i, : w.size(0)] = w
+
+        return {
+            "wav": padded,
+            "wav_lengths": lengths,
+            "text": texts,
+            "speaker": speakers,
+        }
+    
+    
 
 if __name__ == "__main__":
     # test dataset object
