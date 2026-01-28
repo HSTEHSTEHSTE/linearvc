@@ -8,7 +8,7 @@ import torchaudio
 from linearvc import linearvc
 from linearvc.cf_tts.models.tts import ZipVoice
 
-from linearvc.cf_tts.utils.common import invert_normalized_input
+from linearvc.cf_tts.utils.common import normalize_input, invert_normalized_input
 
 # -------------------------
 # helpers
@@ -37,6 +37,9 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--sampling_steps", default=16, type=int)
     parser.add_argument("--target_speaker", default='1272')
+    parser.add_argument("--prompt_audio", type=Path, default=None)
+    parser.add_argument("--prompt_transcript", type=str, default='')
+    parser.add_argument("--feature_lengths", type=int, default=-1)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -76,41 +79,94 @@ def main():
     transform_tgt = torch.tensor(transforms[args.target_speaker]).to(device)
 
     # -------------------------
+    # load and process prompt
+    # -------------------------
+    resamplers = {}
+    if args.prompt_audio is not None:
+        assert len(args.prompt_transcript) > 0
+        wav, sr = torchaudio.load(str(args.prompt_audio), backend='sox')
+        if sr != 16000:
+            if sr not in resamplers:
+                resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+            wav = resamplers[sr](wav)
+        wavs = wav.to(device)
+        prompt_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
+        prompt_features = torch.matmul(prompt_features, transform) * cfg['training']['feature_scale']
+        if cfg['training']['normalize_input']:
+            prompt_features = normalize_input(prompt_features)
+        prompt_features = prompt_features.detach()
+    else:
+        prompt_features = torch.tensor([[[]]], device=device)
+        prompt_tokens = [[]]
+
+    # -------------------------
     # tokenize text
     # -------------------------
 
-    if cfg['training']['text_tokenizer']['type'] == 'spm':
+    if cfg['data']['text_tokenizer']['type'] == 'spm':
         import sentencepiece as spm
         print("Loading SentencePiece...")
         sp = spm.SentencePieceProcessor()
-        sp.load(cfg["training"]["spm_file"])
+        sp.load(cfg['data']['text_tokenizer']['tokenizer_file'])
         tokens = [sp.encode_as_ids(args.text)]
-    elif cfg['training']['text_tokenizer']['type'] == 'phone':
-        from speechbrain.inference.text import GraphemeToPhoneme
-        g2p = GraphemeToPhoneme.from_hparams("speechbrain/soundchoice-g2p", savedir="pretrained_models/soundchoice-g2p")
-        text = g2p(args.text)
+        if args.prompt_audio is not None:
+            prompt_tokens = [sp.encode_as_ids(args.prompt_transcript)]
+    elif cfg['data']['text_tokenizer']['type'] == 'phone':
         import json
-        with open(cfg['training']['text_tokenizer']['tokenizer_file'], 'r') as phone_json_file:
-            phones = json.load(phone_json_file)['phonemes']
-            text_tokenizer = {}
-            for phone_id, phone in enumerate(phones):
-                text_tokenizer[phone] = phone_id
+        text_tokenizer = {}
+        punctuation_marks = ''
+        with open(cfg['data']['text_tokenizer']['tokenizer_file'], 'r') as phone_json_file:
+            phones = json.load(phone_json_file)
+            for category in phones.keys():
+                category_tokens = phones[category]
+                for token_id, token in enumerate(category_tokens):
+                    text_tokenizer[token] = token_id
+                    if category == 'punctuations':
+                        punctuation_marks += token
+        if cfg['data']['text_tokenizer']['pre_phonemized']:
+            from speechbrain.inference.text import GraphemeToPhoneme
+            g2p = GraphemeToPhoneme.from_hparams("speechbrain/soundchoice-g2p", savedir="pretrained_models/soundchoice-g2p")
+            text = g2p(args.text)
+            if args.prompt_audio is not None:
+                prompt_text = g2p(args.prompt_transcript)
+        else:
+            from phonemizer.backend import EspeakBackend
+            from phonemizer.separator import Separator
+            separator = Separator(phone='-', word=' ')
+            backend = EspeakBackend(
+                language='en-us', 
+                preserve_punctuation=True, 
+                punctuation_marks=punctuation_marks,
+                words_mismatch='ignore'
+            )
+            phonemize = backend.phonemize
+            text = phonemize([args.text], separator=separator, strip=True)
+            text = [phone.replace('- ', '-').replace(' ', '-').split('-') for phone in text][0]
+            if args.prompt_audio is not None:
+                prompt_text = phonemize([args.prompt_transcript], separator=separator, strip=True)
+                prompt_text = [phone.replace('- ', '-').replace(' ', '-').split('-') for phone in prompt_text][0]
+
         tokens = [[text_tokenizer[phone] for phone in text if phone in text_tokenizer]]
-        
+        if args.prompt_audio is not None:
+            prompt_tokens = [[text_tokenizer[phone] for phone in prompt_text if phone in text_tokenizer]]
 
     # -------------------------
     # flow matching sampling
     # -------------------------
 
     print("Running sampling...")
+    if args.feature_lengths > 0:
+        duration = 'real'
+    else:
+        duration = 'predict'
     with torch.no_grad():
         out_feats = model.sample(
             tokens=tokens,
-            prompt_tokens=[[]],
-            prompt_features=torch.tensor([[[]]], device=device),
-            prompt_features_lens=torch.tensor([0], device=device),
-            duration='real',
-            features_lens=torch.tensor([500], device=device),
+            prompt_tokens=prompt_tokens,
+            prompt_features=prompt_features,
+            prompt_features_lens=torch.tensor([prompt_features.shape[1]], device=device),
+            duration=duration,
+            features_lens=torch.tensor([args.feature_lengths], device=device),
             num_step=int(args.sampling_steps)
         )[0]
 

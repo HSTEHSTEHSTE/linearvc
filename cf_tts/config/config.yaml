@@ -4,8 +4,8 @@ training:
   project_name: LinearVC_CF-TTS
   run_name: v1.1
   epochs: 100000
-  num_workers: 0
-  max_frames_per_batch: 10000000 # 5 min
+  num_workers: 64
+  max_frames_per_batch: 11200000 # 5 min
   random_seed: 42
   content_factorization_file: /home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/librispeech_dev-clean/rank_75/src_1272/transforms.npy
   condition_drop_ratio: 0.0
@@ -102,7 +102,7 @@ data:
     # librispeech_subsets:
     #   - dev-clean
     commonvoice_subsets:
-      - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/cv-train.csv
+      - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/train.tsv
 
     epoch_batch_limit: -1
     shuffle_batches: true
@@ -113,7 +113,7 @@ data:
     #   - dev-clean
     #   # - dev-other
     commonvoice_subsets:
-      - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/cv-dev.csv
+      - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/dev.tsv
     epoch_batch_limit: 100
     shuffle_batches: true
   # librispeech_audio_path: /home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech

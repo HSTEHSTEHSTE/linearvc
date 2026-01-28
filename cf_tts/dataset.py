@@ -80,7 +80,7 @@ class TTSDataset(Dataset):
                 audio_root = Path(self.config['data']['commonvoice_root_path']) / 'clips'
                 for subset_file in self.config['data'][split]['commonvoice_subsets']:
                     print("Processing ", subset_file)
-                    subset_df = pd.read_csv(subset_file, sep=',', header=0, index_col=0)
+                    subset_df = pd.read_csv(subset_file, sep='|', header=0, index_col=None, quoting=3)
                     for entry in tqdm(subset_df.iterrows(), total=subset_df.shape[0]):
                         self.data.append(TTSDatum(
                             wav_path=audio_root / entry[1].path,
@@ -153,7 +153,7 @@ class FrameBatchSampler(Sampler):
         batch = []
         total_frames = 0
         for idx in self.indices:
-            frames = self.dataset.data[idx].num_frames
+            frames = min(self.dataset.data[idx].num_frames, self.config['data']['max_audio_len'])
 
             # if this utterance alone is too big, force it into its own batch
             if frames > self.max_frames:

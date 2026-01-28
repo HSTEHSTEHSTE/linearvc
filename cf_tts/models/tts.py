@@ -403,7 +403,6 @@ class ZipVoice(nn.Module):
         """
 
         assert duration in ["real", "predict"]
-
         if duration == "predict":
             (
                 text_condition,

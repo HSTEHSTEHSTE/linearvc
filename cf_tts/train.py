@@ -44,7 +44,7 @@ def format_time(start_time, end_time):
     td = datetime.timedelta(seconds=(end_time - start_time))
     return str(td)
 
-def validation_pass(dev_loader, text_tokenizer, linearvc_model, transform, cfg, model, device, step, epoch_batch_length):
+def validation_pass(dev_loader, linearvc_model, transform, cfg, model, device, step, epoch_batch_length):
     model.eval()
 
     total_loss = 0.
@@ -54,16 +54,8 @@ def validation_pass(dev_loader, text_tokenizer, linearvc_model, transform, cfg, 
             break
         wavs = batch["wav"].to(device)            # (B, T)
         wav_lengths = batch["wav_lengths"]
-        texts = batch["text"]                     # list[str]
+        text_ids = batch["text"]                     # list[str]
         speakers = batch["speaker"]               # list[str]
-
-        text_ids = []
-        for text in texts:
-            if cfg['training']['text_tokenizer']['type'] == 'spm':
-                text_ids.append(text_tokenizer.encode_as_ids(text))
-            elif cfg['training']['text_tokenizer']['type'] == 'phone':
-                text = text.split(' ')
-                text_ids.append([text_tokenizer[phone] for phone in text if phone in text_tokenizer])
 
         with torch.no_grad():
             input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
@@ -290,7 +282,6 @@ def main():
             if step % cfg["training"]["save_every_steps"] == 0 and step > 0:
                 validation_loss = validation_pass(
                     dev_loader, 
-                    text_tokenizer, 
                     linearvc_model, 
                     transform, 
                     cfg, 
@@ -320,7 +311,6 @@ def main():
         if epoch % cfg["training"]["save_every_epochs"] == 0 and step > 0:
             validation_loss = validation_pass(
                 dev_loader, 
-                text_tokenizer, 
                 linearvc_model, 
                 transform, 
                 cfg, 
