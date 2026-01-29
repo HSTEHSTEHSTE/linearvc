@@ -40,6 +40,7 @@ def main():
     parser.add_argument("--prompt_audio", type=Path, default=None)
     parser.add_argument("--prompt_transcript", type=str, default='')
     parser.add_argument("--feature_lengths", type=int, default=-1)
+    parser.add_argument("--vad", type=bool, default=True)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -89,6 +90,13 @@ def main():
             if sr not in resamplers:
                 resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
             wav = resamplers[sr](wav)
+            sr = 16000
+        if args.vad:
+            effects = [['reverse']]
+            wav = torchaudio.functional.vad(wav, sr)
+            wav, sr = torchaudio.sox_effects.apply_effects_tensor(wav, sr, effects)
+            wav = torchaudio.functional.vad(wav, sr)
+            wav, sr = torchaudio.sox_effects.apply_effects_tensor(wav, sr, effects)
         wavs = wav.to(device)
         prompt_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
         prompt_features = torch.matmul(prompt_features, transform) * cfg['training']['feature_scale']
