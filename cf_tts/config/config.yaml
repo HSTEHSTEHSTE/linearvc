@@ -2,12 +2,16 @@
 training:
   # Training parameters
   project_name: LinearVC_CF-TTS
-  run_name: v1.1
+  run_name: v1.9
   epochs: 100000
-  num_workers: 64
+  num_workers: 16
   max_frames_per_batch: 11200000 # 5 min
   random_seed: 42
-  content_factorization_file: /home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/librispeech_dev-clean/rank_75/src_1272/transforms.npy
+  content_factorization: 
+    # type: content
+    # content_factorization_file: /home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/librispeech_dev-clean/rank_75/src_1272/transforms.npy
+    type: speaker
+    factorization_speaker: /home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/dev-clean/1272
   condition_drop_ratio: 0.0
   noise_scale: 1.0
   feature_scale: 0.1
@@ -17,11 +21,11 @@ training:
   use_grad_scaler: true
   
   # logging
-  log_every: 50
+  log_every: 100
 
   # Checkpoint managedment
-  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v1.1
-  save_every_steps: 1000
+  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v1.9
+  save_every_steps: 2000
   save_every_epochs: 1
   num_ckpt_best_loss: 3
   num_ckpt_latest_epochs: 3

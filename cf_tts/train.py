@@ -59,7 +59,9 @@ def validation_pass(dev_loader, linearvc_model, transform, cfg, model, device, s
 
         with torch.no_grad():
             input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
-            input_features = torch.matmul(input_features, transform) * cfg['training']['feature_scale']
+            if transform is not None:
+                input_features = torch.matmul(input_features, transform) 
+            input_features = input_features * cfg['training']['feature_scale']
             if cfg['training']['normalize_input']:
                 input_features = normalize_input(input_features)
             input_features = input_features.detach()
@@ -200,8 +202,11 @@ def main():
     )
     linearvc_model = linearvc.LinearVC(wavlm, hifigan, device)
 
-    transform = np.load(cfg['training']['content_factorization_file'], allow_pickle=True).item()
-    transform = torch.tensor(np.linalg.pinv(transform[list(transform.keys())[0]])).to(device)
+    if cfg['training']['content_factorization_file'] is not None:
+        transform = np.load(cfg['training']['content_factorization_file'], allow_pickle=True).item()
+        transform = torch.tensor(np.linalg.pinv(transform[list(transform.keys())[0]])).to(device)
+    else:
+        transform = None
 
     # -------------------------
     # training loop
@@ -237,7 +242,9 @@ def main():
 
             with torch.no_grad():
                 input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
-                input_features = torch.matmul(input_features, transform) * cfg['training']['feature_scale']
+                if transform is not None:
+                    input_features = torch.matmul(input_features, transform)
+                input_features = input_features * cfg['training']['feature_scale']
                 if cfg['training']['normalize_input']:
                     input_features = normalize_input(input_features)
                 input_features = input_features.detach()
