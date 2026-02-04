@@ -7,10 +7,6 @@ training:
   num_workers: 16
   max_frames_per_batch: 11200000 # 5 min
   random_seed: 42
-  text_tokenizer:
-    type: phone  # spm, phone
-    # tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/m_8000.model
-    tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/phones.json
   content_factorization_file: /home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/librispeech_dev-clean/rank_75/src_1272/transforms.npy
   condition_drop_ratio: 0.0
   noise_scale: 1.0
@@ -34,7 +30,7 @@ training:
 
 # optimizer and scheduler
 optim:
-  lr: 1.0e-4
+  lr: 1.0e-5
   weight_decay: 1.0e-6
 
 
@@ -88,6 +84,11 @@ model:
 
 # data
 data:
+  text_tokenizer:
+    type: phone  # spm, phone
+    pre_phonemized: true
+    # tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/m_8000.model
+    tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/phones.json
   train:
     dataset: 'librispeech'
     load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_transcripts_phones.pkl

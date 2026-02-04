@@ -220,12 +220,19 @@ class TTS_Collate:
                 from phonemizer.backend import EspeakBackend
                 from phonemizer.separator import Separator
                 self.separator = Separator(phone='-', word=' ')
-                backend = EspeakBackend(
-                    language='en-us', 
-                    preserve_punctuation=True, 
-                    punctuation_marks=punctuation_marks,
-                    words_mismatch='ignore'
-                )
+                if len(punctuation_marks) > 0:
+                    backend = EspeakBackend(
+                        language='en-us', 
+                        preserve_punctuation=True, 
+                        punctuation_marks=punctuation_marks,
+                        words_mismatch='ignore'
+                    )
+                else:
+                    backend = EspeakBackend(
+                        language='en-us', 
+                        preserve_punctuation=True, 
+                        words_mismatch='ignore'
+                    )
                 self.phonemize = backend.phonemize
 
     def __call__(self, batch: List[Dict]):

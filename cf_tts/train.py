@@ -1,48 +1,23 @@
 import argparse, math, shutil
 from pathlib import Path
-import yaml, wandb
+import wandb
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from torch.autograd import detect_anomaly
 
-import time, datetime
+import time
 from linearvc import linearvc
 from linearvc.cf_tts.dataset import TTSDataset, FrameBatchSampler, TTS_Collate
 from linearvc.cf_tts.models.tts import ZipVoice
-from linearvc.cf_tts.utils.common import create_grad_scaler, normalize_input, manage_checkpoints
-
+from linearvc.cf_tts.utils.common import create_grad_scaler, normalize_input, load_config, format_time
+from linearvc.cf_tts.utils.checkpoints import load_checkpoint, manage_checkpoints, save_checkpoint
+from linearvc.cf_tts.utils.optim import get_scheduler
 
 # -------------------------
 # helpers
 # -------------------------
-
-def load_config(path):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def save_checkpoint(model, optimizer, step, path, outdir, cfg):
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "step": step,
-        },
-        path,
-    )
-    ckpt_logs = manage_checkpoints(outdir, keep_loss=cfg['training']['num_ckpt_best_loss'], keep_epoch=cfg['training']['num_ckpt_latest_epochs'], keep_step=cfg['training']['num_ckpt_latest_steps'])
-
-def load_checkpoint(model, optimizer, path, device):
-    ckpt = torch.load(path, map_location=device)
-    model.load_state_dict(ckpt["model"])
-    optimizer.load_state_dict(ckpt["optimizer"])
-    return ckpt["step"]
-
-def format_time(start_time, end_time):
-    td = datetime.timedelta(seconds=(end_time - start_time))
-    return str(td)
 
 def validation_pass(dev_loader, linearvc_model, transform, cfg, model, device, step, epoch_batch_length):
     model.eval()
@@ -54,12 +29,26 @@ def validation_pass(dev_loader, linearvc_model, transform, cfg, model, device, s
             break
         wavs = batch["wav"].to(device)            # (B, T)
         wav_lengths = batch["wav_lengths"]
-        text_ids = batch["text"]                     # list[str]
+        text_ids = batch["text"]                  # list[str]
         speakers = batch["speaker"]               # list[str]
 
         with torch.no_grad():
             input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
-            input_features = torch.matmul(input_features, transform) * cfg['training']['feature_scale']
+            if cfg['training']['content_factorization']['type'] == 'content':
+                if transform is not None:
+                    input_features = torch.matmul(input_features, transform)
+            elif cfg['training']['content_factorization']['type'] == 'speaker':
+                # perform knn matching
+                batch_size = input_features.shape[0] # b
+                input_features = input_features.view(-1, input_features.shape[-1]) # [b * t, d]
+                _, neighbors = brute_force.search(index, input_features, k=4)
+                neighbors = torch.as_tensor(neighbors, device='cuda') # [b * t, k]
+                neighbors = neighbors.view(-1) # [b * t * k]
+                input_features = feats.index_select(0, neighbors) # [b * t * k, d]
+                input_features = input_features.view(-1, 4, input_features.shape[-1]) # [b * t, k, d]
+                input_features = torch.mean(input_features, dim=1) # [b * t, d]
+                input_features = input_features.view(batch_size, -1, input_features.shape[-1]) 
+            input_features = input_features * cfg['training']['feature_scale']
             if cfg['training']['normalize_input']:
                 input_features = normalize_input(input_features)
             input_features = input_features.detach()
@@ -73,7 +62,7 @@ def validation_pass(dev_loader, linearvc_model, transform, cfg, model, device, s
                 features_lens=wav_lengths,
                 noise=cfg['training']['noise_scale'] * torch.randn_like(input_features).to(device), # Note: noise added to features. Not uniform random noise
                 t=torch.rand(input_features.shape[0], 1, 1, device=device),
-                condition_drop_ratio=cfg['training']['condition_drop_ratio']
+                condition_drop_ratio=0.
             )
 
         total_loss += loss.item()
@@ -175,11 +164,13 @@ def main():
         epoch_batch_length = len(train_loader)
 
     if args.checkpoint_path is not None and args.checkpoint_path != 'none':
-        current_step = load_checkpoint(model, optimizer, args.checkpoint_path, device)
+        current_step = load_checkpoint(model, args.checkpoint_path, device, optimizer=optimizer)
         current_epoch = math.floor((current_step) / epoch_batch_length)
     else:
         current_step = -1
         current_epoch = 0
+
+    scheduler = get_scheduler(cfg['optim']['scheduler_type'], optimizer, current_epoch - 1, cfg['optim']['scheduler_args'])
 
     scaler = create_grad_scaler()
 
@@ -200,8 +191,35 @@ def main():
     )
     linearvc_model = linearvc.LinearVC(wavlm, hifigan, device)
 
-    transform = np.load(cfg['training']['content_factorization_file'], allow_pickle=True).item()
-    transform = torch.tensor(np.linalg.pinv(transform[list(transform.keys())[0]])).to(device)
+    if cfg['training']['content_factorization']['type'] == 'content':
+        if cfg['training']['content_factorization']['content_factorization_file'] is not None:
+            transform = np.load(cfg['training']['content_factorization']['content_factorization_file'], allow_pickle=True).item()
+            transform = torch.tensor(np.linalg.pinv(transform[list(transform.keys())[0]])).to(device)
+        else:
+            transform = None
+    elif cfg['training']['content_factorization']['type'] == 'speaker':
+        from cuvs.neighbors import brute_force
+        import torchaudio
+        wavs = []
+        extensions = ['wav', 'mp3', 'flac']
+        factorization_speaker_path = Path(cfg['training']['content_factorization']['factorization_speaker'])
+        for extension in extensions:
+            wavs += list(factorization_speaker_path.rglob('*.' + extension))
+        with torch.no_grad():
+            feats = []
+            resamplers = {}
+            for wav_dir in wavs:
+                wav, sr = torchaudio.load(wav_dir)
+                if sr != 16000:
+                    if sr not in resamplers:
+                        resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+                    wav = resamplers[sr](wav)
+                wav = wav.to(device)
+                input_features, _ = linearvc_model.wavlm.extract_features(wav, output_layer=6)
+                feats.append(input_features.squeeze(0))
+        feats = torch.cat(feats, dim=0)
+        index = brute_force.build(feats)
+
 
     # -------------------------
     # training loop
@@ -237,7 +255,21 @@ def main():
 
             with torch.no_grad():
                 input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
-                input_features = torch.matmul(input_features, transform) * cfg['training']['feature_scale']
+                if cfg['training']['content_factorization']['type'] == 'content':
+                    if transform is not None:
+                        input_features = torch.matmul(input_features, transform)
+                elif cfg['training']['content_factorization']['type'] == 'speaker':
+                    # perform knn matching
+                    batch_size = input_features.shape[0] # b
+                    input_features = input_features.view(-1, input_features.shape[-1]) # [b * t, d]
+                    _, neighbors = brute_force.search(index, input_features, k=4)
+                    neighbors = torch.as_tensor(neighbors, device='cuda') # [b * t, k]
+                    neighbors = neighbors.view(-1) # [b * t * k]
+                    input_features = feats.index_select(0, neighbors) # [b * t * k, d]
+                    input_features = input_features.view(-1, 4, input_features.shape[-1]) # [b * t, k, d]
+                    input_features = torch.mean(input_features, dim=1) # [b * t, d]
+                    input_features = input_features.view(batch_size, -1, input_features.shape[-1])
+                input_features = input_features * cfg['training']['feature_scale']
                 if cfg['training']['normalize_input']:
                     input_features = normalize_input(input_features)
                 input_features = input_features.detach()
@@ -333,6 +365,8 @@ def main():
                 outdir,
                 cfg
             )
+
+        scheduler.step()
 
 
 if __name__ == "__main__":

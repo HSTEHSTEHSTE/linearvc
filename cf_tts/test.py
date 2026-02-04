@@ -8,21 +8,8 @@ import torchaudio
 from linearvc import linearvc
 from linearvc.cf_tts.models.tts import ZipVoice
 
-from linearvc.cf_tts.utils.common import normalize_input, invert_normalized_input
-
-# -------------------------
-# helpers
-# -------------------------
-
-def load_config(path):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def load_checkpoint(model, path, device):
-    ckpt = torch.load(path, map_location=device)
-    model.load_state_dict(ckpt["model"])
-    return ckpt["step"]
+from linearvc.cf_tts.utils.common import normalize_input, invert_normalized_input, load_config
+from linearvc.cf_tts.utils.checkpoints import load_checkpoint
 
 
 # -------------------------
@@ -36,11 +23,13 @@ def main():
     parser.add_argument("--text", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--sampling_steps", default=16, type=int)
+    parser.add_argument("--target_speaker_audio", default=None)
+    parser.add_argument("--target_speaker_num_frames", default=-1, type=int)
     parser.add_argument("--target_speaker", default='1272')
     parser.add_argument("--prompt_audio", type=Path, default=None)
     parser.add_argument("--prompt_transcript", type=str, default='')
     parser.add_argument("--feature_lengths", type=int, default=-1)
-    parser.add_argument("--vad", type=bool, default=True)
+    parser.add_argument("--vad", type=bool, default=False)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -75,14 +64,34 @@ def main():
     # load transform
     # -------------------------
 
-    transforms = np.load(cfg["training"]["content_factorization_file"], allow_pickle=True).item()
-    transform = torch.tensor(np.linalg.pinv(transforms[list(transforms.keys())[0]])).to(device)
-    transform_tgt = torch.tensor(transforms[args.target_speaker]).to(device)
+    resamplers = {}
+    if cfg["training"]["content_factorization_file"] is not None:
+        transforms = np.load(cfg["training"]["content_factorization_file"], allow_pickle=True).item()
+        transform = torch.tensor(np.linalg.pinv(transforms[list(transforms.keys())[0]])).to(device)
+        if args.target_speaker_audio is None:
+            transform_tgt = torch.tensor(transforms[args.target_speaker]).to(device)
+        else:
+            with torch.no_grad():
+                transform_wav, sr = torchaudio.load(args.target_speaker_audio)
+                if sr != 16000:
+                    if sr not in resamplers:
+                        resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+                    transform_wav = resamplers[sr](transform_wav)
+                    sr = 16000
+                transform_features, _ = linearvc_model.wavlm.extract_features(transform_wav.to(device), output_layer=6) # [1, t, 1024]
+                if args.target_speaker_num_frames > 0:
+                    frames = torch.randperm(transform_features.shape[1])[:args.target_speaker_num_frames]
+                    transform_features = transform_features[:, frames, :]
+                transform_content = torch.matmul(transform_features, transform).squeeze(0).cpu().detach().numpy() # [t, r]
+                transform_tgt = np.matmul(np.linalg.pinv(transform_content), transform_features.squeeze(1).cpu().detach().numpy()) # [r, 1024]
+                transform_tgt = torch.tensor(transform_tgt).to(device)
+    else:
+        transform = None
+        transform_tgt = None
 
     # -------------------------
     # load and process prompt
     # -------------------------
-    resamplers = {}
     if args.prompt_audio is not None:
         assert len(args.prompt_transcript) > 0
         wav, sr = torchaudio.load(str(args.prompt_audio), backend='sox')
@@ -99,7 +108,9 @@ def main():
             wav, sr = torchaudio.sox_effects.apply_effects_tensor(wav, sr, effects)
         wavs = wav.to(device)
         prompt_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
-        prompt_features = torch.matmul(prompt_features, transform) * cfg['training']['feature_scale']
+        if transform is not None:
+            prompt_features = torch.matmul(prompt_features, transform)
+        prompt_features = prompt_features * cfg['training']['feature_scale']
         if cfg['training']['normalize_input']:
             prompt_features = normalize_input(prompt_features)
         prompt_features = prompt_features.detach()
@@ -187,7 +198,9 @@ def main():
         if cfg['training']['normalize_input']:
             out_feats = invert_normalized_input(out_feats)
         out_feats = out_feats / cfg['training']['feature_scale']
-        audio = linearvc_model.hifigan(torch.matmul(out_feats, transform_tgt))
+        if transform is not None:
+            out_feats = torch.matmul(out_feats, transform_tgt)
+        audio = linearvc_model.hifigan(out_feats)
 
     audio = audio.squeeze().cpu()
 
