@@ -8,21 +8,8 @@ import torchaudio
 from linearvc import linearvc
 from linearvc.cf_tts.models.tts import ZipVoice
 
-from linearvc.cf_tts.utils.common import normalize_input, invert_normalized_input
-
-# -------------------------
-# helpers
-# -------------------------
-
-def load_config(path):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def load_checkpoint(model, path, device):
-    ckpt = torch.load(path, map_location=device)
-    model.load_state_dict(ckpt["model"])
-    return ckpt["step"]
+from linearvc.cf_tts.utils.common import normalize_input, invert_normalized_input, load_config
+from linearvc.cf_tts.utils.checkpoints import load_checkpoint
 
 
 # -------------------------
