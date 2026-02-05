@@ -11,7 +11,7 @@ import time
 from linearvc import linearvc
 from linearvc.cf_tts.dataset import TTSDataset, FrameBatchSampler, TTS_Collate
 from linearvc.cf_tts.models.tts import ZipVoice
-from linearvc.cf_tts.utils.common import create_grad_scaler, normalize_input, load_config, format_time
+from linearvc.cf_tts.utils.common import create_grad_scaler, normalize_input, load_config, format_time, get_speaker_feats, match_knn
 from linearvc.cf_tts.utils.checkpoints import load_checkpoint, manage_checkpoints, save_checkpoint
 from linearvc.cf_tts.utils.optim import get_scheduler
 
@@ -38,16 +38,7 @@ def validation_pass(dev_loader, linearvc_model, transform, cfg, model, device, s
                 if transform is not None:
                     input_features = torch.matmul(input_features, transform)
             elif cfg['training']['content_factorization']['type'] == 'speaker':
-                # perform knn matching
-                batch_size = input_features.shape[0] # b
-                input_features = input_features.view(-1, input_features.shape[-1]) # [b * t, d]
-                _, neighbors = brute_force.search(index, input_features, k=4)
-                neighbors = torch.as_tensor(neighbors, device='cuda') # [b * t, k]
-                neighbors = neighbors.view(-1) # [b * t * k]
-                input_features = feats.index_select(0, neighbors) # [b * t * k, d]
-                input_features = input_features.view(-1, 4, input_features.shape[-1]) # [b * t, k, d]
-                input_features = torch.mean(input_features, dim=1) # [b * t, d]
-                input_features = input_features.view(batch_size, -1, input_features.shape[-1]) 
+                input_features = match_knn(input_features)
             input_features = input_features * cfg['training']['feature_scale']
             if cfg['training']['normalize_input']:
                 input_features = normalize_input(input_features)
@@ -199,26 +190,16 @@ def main():
             transform = None
     elif cfg['training']['content_factorization']['type'] == 'speaker':
         from cuvs.neighbors import brute_force
-        import torchaudio
-        wavs = []
-        extensions = ['wav', 'mp3', 'flac']
-        factorization_speaker_path = Path(cfg['training']['content_factorization']['factorization_speaker'])
-        for extension in extensions:
-            wavs += list(factorization_speaker_path.rglob('*.' + extension))
-        with torch.no_grad():
-            feats = []
-            resamplers = {}
-            for wav_dir in wavs:
-                wav, sr = torchaudio.load(wav_dir)
-                if sr != 16000:
-                    if sr not in resamplers:
-                        resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
-                    wav = resamplers[sr](wav)
-                wav = wav.to(device)
-                input_features, _ = linearvc_model.wavlm.extract_features(wav, output_layer=6)
-                feats.append(input_features.squeeze(0))
-        feats = torch.cat(feats, dim=0)
+        feats = get_speaker_feats(
+            tgt_speaker_root=cfg['training']['content_factorization']['factorization_speaker'],
+            linearvc_model=linearvc_model
+        )
         index = brute_force.build(feats)
+        transform = {
+            'feats': feats,
+            'index': index,
+            'brute_force': brute_force
+        }
 
 
     # -------------------------
@@ -262,10 +243,10 @@ def main():
                     # perform knn matching
                     batch_size = input_features.shape[0] # b
                     input_features = input_features.view(-1, input_features.shape[-1]) # [b * t, d]
-                    _, neighbors = brute_force.search(index, input_features, k=4)
+                    _, neighbors = transform['brute_force'].search(transform['index'], input_features, k=4)
                     neighbors = torch.as_tensor(neighbors, device='cuda') # [b * t, k]
                     neighbors = neighbors.view(-1) # [b * t * k]
-                    input_features = feats.index_select(0, neighbors) # [b * t * k, d]
+                    input_features = transform['feats'].index_select(0, neighbors) # [b * t * k, d]
                     input_features = input_features.view(-1, 4, input_features.shape[-1]) # [b * t, k, d]
                     input_features = torch.mean(input_features, dim=1) # [b * t, d]
                     input_features = input_features.view(batch_size, -1, input_features.shape[-1])

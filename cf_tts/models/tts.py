@@ -346,6 +346,7 @@ class ZipVoice(nn.Module):
             mask_percent=self.mask_ratio,
             max_len=features.size(1),
         )
+        breakpoint()
         speech_condition = torch.where(speech_condition_mask.unsqueeze(-1), 0, features)
 
         if condition_drop_ratio > 0.0:

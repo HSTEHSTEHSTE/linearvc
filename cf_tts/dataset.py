@@ -2,6 +2,7 @@
 import os
 import json, yaml
 import random
+import re
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
@@ -250,6 +251,7 @@ class TTS_Collate:
                     texts.append([self.text_tokenizer[phone] for phone in text_raw if phone in self.text_tokenizer])
             else:
                 phones = self.phonemize(texts_raw, separator=self.separator, strip=True)
+                phones = [re.sub(r"""([;:,.!?¡¿—…"«»“”\(\)\{\}\[\]])""", r"-\1", phone) for phone in phones]
                 phones = [phone.replace('- ', '-').replace(' ', '-').split('-') for phone in phones]
                 for text in phones:
                     texts.append([self.text_tokenizer[token] for token in text if token in self.text_tokenizer])

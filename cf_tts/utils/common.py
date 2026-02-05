@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 
-import torch
+import torch, torchaudio
 from packaging import version
 from torch import distributed as dist
 from torch import nn
@@ -685,3 +685,38 @@ def load_config(path):
 def format_time(start_time, end_time):
     td = datetime.timedelta(seconds=(end_time - start_time))
     return str(td)
+
+
+def get_speaker_feats(tgt_speaker_root, linearvc_model, extensions=['wav', 'mp3', 'flac']):
+    tgt_speaker_root = Path(tgt_speaker_root)
+    wavs = []
+    for extension in extensions:
+        wavs += list(tgt_speaker_root.rglob('*.' + extension))
+    with torch.no_grad():
+        feats = []
+        resamplers = {}
+        for wav_dir in wavs:
+            wav, sr = torchaudio.load(wav_dir)
+            if sr != 16000:
+                if sr not in resamplers:
+                    resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+                wav = resamplers[sr](wav)
+            wav = wav.to(device)
+            input_features, _ = linearvc_model.wavlm.extract_features(wav, output_layer=6)
+            feats.append(input_features.squeeze(0))
+    feats = torch.cat(feats, dim=0)
+    return feats
+
+
+def match_knn(input_features, transform, k=4):
+    # perform knn matching
+    batch_size = input_features.shape[0] # b
+    input_features = input_features.view(-1, input_features.shape[-1]) # [b * t, d]
+    _, neighbors = transform['brute_force'].search(transform['index'], input_features, k=4)
+    neighbors = torch.as_tensor(neighbors, device='cuda') # [b * t, k]
+    neighbors = neighbors.view(-1) # [b * t * k]
+    input_features = transform['feats'].index_select(0, neighbors) # [b * t * k, d]
+    input_features = input_features.view(-1, 4, input_features.shape[-1]) # [b * t, k, d]
+    input_features = torch.mean(input_features, dim=1) # [b * t, d]
+    input_features = input_features.view(batch_size, -1, input_features.shape[-1])
+    return input_features
