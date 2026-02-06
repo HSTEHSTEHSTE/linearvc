@@ -40,7 +40,8 @@ class ZipVoice(nn.Module):
         vocab_size: int = 26,
         pad_id: int = 0,
         mask_ratio_min: float = 1.0,
-        mask_ratio_max: float = 1.0
+        mask_ratio_max: float = 1.0,
+        mask_text: bool = False
     ):
         """
         Initialize the model with specified configuration parameters.
@@ -117,6 +118,7 @@ class ZipVoice(nn.Module):
         self.solver = EulerSolver(self, func_name="forward_fm_decoder")
 
         self.mask_ratio = (mask_ratio_min, mask_ratio_max)
+        self.mask_text = mask_text
 
     def forward_fm_decoder(
         self,
@@ -346,7 +348,9 @@ class ZipVoice(nn.Module):
             mask_percent=self.mask_ratio,
             max_len=features.size(1),
         )
-        breakpoint()
+
+        if self.mask_text:
+            text_condition = torch.where(speech_condition_mask.unsqueeze(-1), text_condition, 0)
         speech_condition = torch.where(speech_condition_mask.unsqueeze(-1), 0, features)
 
         if condition_drop_ratio > 0.0:

@@ -2,10 +2,10 @@
 training:
   # Training parameters
   project_name: LinearVC_CF-TTS
-  run_name: v2.1
+  run_name: v2.3
   epochs: 100000
   num_workers: 16
-  max_frames_per_batch: 5600000 # 5 min todo fix
+  max_frames_per_batch: 11200000 # 5 min todo fix
   random_seed: 42
   content_factorization: 
     type: content # content, speaker
@@ -23,7 +23,7 @@ training:
   log_every: 100
 
   # Checkpoint managedment
-  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v2.1
+  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v2.3
   save_every_steps: 2000
   save_every_epochs: 1
   num_ckpt_best_loss: 3
@@ -84,12 +84,13 @@ model:
       time_embed_dim: 192
       text_embed_dim: 192
 
-      feat_dim: 1024
+      feat_dim: 75
 
       vocab_size: 80 # pre_phonemized: 39, otherwise 80
       
-      mask_ratio_min: 0.5
+      mask_ratio_min: 0.2
       mask_ratio_max: 1.0
+      mask_text: False
 
 # data
 data:
