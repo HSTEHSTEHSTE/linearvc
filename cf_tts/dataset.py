@@ -103,9 +103,9 @@ class TTSDataset(Dataset):
         item = self.data[idx]
 
         if item.wav_path.suffix == '.mp3':
-            wav, sr = torchaudio.load(item.wav_path, backend='ffmpeg')
+            wav, sr = torchaudio.load(item.wav_path)
         else:
-            wav, sr = torchaudio.load(item.wav_path, backend='soundfile')
+            wav, sr = torchaudio.load(item.wav_path)
         if sr != 16000:
             if sr not in self.resamplers:
                 self.resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
@@ -178,9 +178,12 @@ class FrameBatchSampler(Sampler):
         if self.config['data'][split]['shuffle_batches']:
             random.seed(self.config['training']['random_seed'])
             random.shuffle(self.batches)
+        self.shuffle = self.config['data'][split]['shuffle_batches_between_epochs']
 
 
     def __iter__(self):
+        if self.shuffle:
+            random.shuffle(self.batches)
         for batch in self.batches:
             yield batch
         

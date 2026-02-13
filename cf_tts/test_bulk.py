@@ -1,12 +1,15 @@
 import argparse
+import os
 from pathlib import Path
 import re
+import shutil
 from tqdm import tqdm
 import yaml
 import numpy as np
 import pandas as pd
 import torch
 import torchaudio
+from pyannote.audio import Pipeline
 
 from linearvc import linearvc
 from linearvc.cf_tts.models.tts import ZipVoice
@@ -26,12 +29,14 @@ def main():
     parser.add_argument("--inference_file_dir", required=True)
     parser.add_argument("--out_dir", required=True)
     parser.add_argument("--sampling_steps", default=16, type=int)
+    parser.add_argument("--vad", default=True, type=bool)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / 'out_wavs').mkdir(parents=True, exist_ok=True)
+    (out_dir / 'prompt_wavs').mkdir(parents=True, exist_ok=True)
 
     # -------------------------
     # load models
@@ -57,6 +62,8 @@ def main():
         device=device
     )
     linearvc_model = linearvc.LinearVC(wavlm, hifigan, device)
+    pipeline = Pipeline.from_pretrained('pyannote/speaker-diarization-3.1')
+    pipeline.to(device)
 
     # -------------------------
     # load transform
@@ -134,12 +141,25 @@ def main():
                     resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
                 wav = resamplers[sr](wav)
                 sr = 16000
-            if 'vad' in inference_item and inference_item['vad']:
-                effects = [['reverse']]
-                wav = torchaudio.functional.vad(wav, sr)
-                wav, sr = torchaudio.sox_effects.apply_effects_tensor(wav, sr, effects)
-                wav = torchaudio.functional.vad(wav, sr)
-                wav, sr = torchaudio.sox_effects.apply_effects_tensor(wav, sr, effects)
+            if args.vad:
+                diarization = pipeline(
+                    {
+                        'waveform': wav,
+                        'sample_rate': sr,
+                    },
+                    num_speakers = 1
+                )
+                new_wav = torch.zeros(wav.shape)
+                wav_start = -1
+                wav_end = -1
+                for segment, _, _ in diarization.itertracks(yield_label=True):
+                    start_frame = int(segment.start * sr)
+                    if wav_start == -1:
+                        wav_start = start_frame
+                    end_frame = int(segment.end * sr)
+                    new_wav[:, start_frame:end_frame] = wav[:, start_frame:end_frame]
+                new_wav = new_wav[:, wav_start:wav_end]
+                wav = new_wav
             wavs = wav.to(device)
             prompt_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
             if transform is not None:
@@ -171,6 +191,7 @@ def main():
                 text = [phone.replace('- ', '-').replace(' ', '-').split('-') for phone in text][0]
                 if inference_item['prompt_audio'] is not None:
                     prompt_text = phonemize([inference_item['prompt_transcript']], separator=separator, strip=True)
+                    prompt_text = [re.sub(r"""([;:,.!?¡¿—…"«»“”\(\)\{\}\[\]])""", r"-\1", prompt_text[0])]
                     prompt_text = [phone.replace('- ', '-').replace(' ', '-').split('-') for phone in prompt_text][0]
             tokens = [[text_tokenizer[phone] for phone in text if phone in text_tokenizer]]
             if inference_item['prompt_audio'] is not None:
@@ -226,7 +247,8 @@ def main():
         audio = audio.squeeze().cpu()
 
         # save
-        torchaudio.save(str(out_dir / inference_item['out_wav_name']), audio.unsqueeze(0), 16000)
+        torchaudio.save(str(out_dir / 'out_wavs' / inference_item['out_wav_name']), audio.unsqueeze(0), 16000)
+        shutil.copy2(inference_item['prompt_audio'], out_dir / 'prompt_wavs' / inference_item['out_wav_name'])
 
 
 

@@ -37,7 +37,7 @@ class LinearVC(nn.Module):
         VAD is applied by default.
         """
 
-        wav, sr = torchaudio.load(wav_fn)
+        wav, sr = torchaudio.load(str(wav_fn))
         wav = wav.to(self.device)
 
         if not sr == self.sr:

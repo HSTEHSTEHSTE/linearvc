@@ -34,6 +34,12 @@ def check_argv():
         help="root path to content factorization"
     )
     parser.add_argument(
+        "--pseudoinverse_type",
+        type=str,
+        default='lstsq, anchor, true',
+        help="lstsq"
+    )
+    parser.add_argument(
         "--pinv_anchor",
         type=str,
         default='1272',
@@ -52,6 +58,10 @@ def main(args):
     content_path = Path(args.content_factorization_path)
     spk_anchor = args.pinv_anchor
     transforms = np.load(content_path / 'transforms.npy', allow_pickle=True).item()
+    if args.pseudoinverse_type == 'lstsq':
+        ST = np.load(content_path / 'ST.npy')
+    elif args.pseudoinverse_type == 'anchor':
+        ST = transforms[spk_anchor]
 
     extensions = ['wav', 'flac']
 

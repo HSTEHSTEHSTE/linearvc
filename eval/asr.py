@@ -3,6 +3,7 @@ import torch
 import whisper
 from pathlib import Path
 from tqdm import tqdm
+import pandas as pd
 
 if torch.cuda.is_available():
     device = 'cuda'
@@ -25,20 +26,34 @@ def check_argv():
         "--dataset",
         type=str,
         default='librispeech',
-        help="dataset structure",
+        help="dataset structure: librispeech or commonvoice",
+    )
+    parser.add_argument(
+        "--whisper_model",
+        type=str,
+        default='large',
+        help="Whisper model used.",
+    )
+    parser.add_argument(
+        "--csv_file",
+        type=str,
+        default='',
+        help="CSV file. Only applicable for commonvoice",
     )
     return parser.parse_args()
 
 def main(args):
     print("Converted dir: ", args.converted_dir)
     print("Out transcript dir: ", args.out_transcript_dir)
+    print("Dataset: ", args.dataset)
+    print("Whisper Model: ", args.whisper_model)
     converted_dir = Path(args.converted_dir)
     out_transcript_dir = Path(args.out_transcript_dir)
     out_transcript_dir.mkdir(parents=True, exist_ok=True)
 
     extensions = ['wav', 'flac', 'mp3']
 
-    model = whisper.load_model('large', device="cuda")
+    model = whisper.load_model(args.whisper_model, device="cuda")
 
     if args.dataset == 'librispeech':
         spks_long = converted_dir.iterdir()
@@ -60,18 +75,25 @@ def main(args):
                     out_transcript_file.write(transcript + '|' + transcripts[transcript] + '\n')
 
     elif args.dataset == 'commonvoice':
-        wavs = []
-        transcripts = {}
-        for extension in extensions:
-            wavs += converted_dir.rglob('*.' + extension)
+        if len(args.csv_file) > 0:
+            csv_file = pd.read_csv(args.csv_file, sep='|', header=0, index_col=None, quoting=3)
+            csv_file['transcript'] = ''
+            for index, entry in tqdm(csv_file.iterrows(), total = csv_file.shape[0]):
+                transcript = model.transcribe(str(converted_dir / entry['path']), language='en')
+                csv_file.loc[index, 'transcript'] = transcript['text'].replace('|', ' ')
+            csv_file.to_csv(out_transcript_dir / Path(args.csv_file).name, sep='|', index=False)
+        else:
+            wavs = []
+            transcripts = {}
+            for extension in extensions:
+                wavs += converted_dir.rglob('*.' + extension)
+            for wav in tqdm(wavs):
+                transcript = model.transcribe(str(wav), language="english")
+                transcripts[wav.stem] = transcript['text']
 
-        for wav in tqdm(wavs):
-            transcript = model.transcribe(str(wav), language="english")
-            transcripts[wav.stem] = transcript['text']
-
-        with open(out_transcript_dir / ('out.txt'), 'w') as out_transcript_file:
-            for transcript in transcripts:
-                out_transcript_file.write(transcript + '|' + transcripts[transcript] + '\n')
+            with open(out_transcript_dir / ('out.txt'), 'w') as out_transcript_file:
+                for transcript in transcripts:
+                    out_transcript_file.write(transcript + '|' + transcripts[transcript] + '\n')
 
 
 if __name__ == "__main__":

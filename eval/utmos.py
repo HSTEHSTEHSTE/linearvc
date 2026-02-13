@@ -1,8 +1,13 @@
 import argparse
 import utmosv2
-import torchaudio
 from pathlib import Path
 from tqdm import tqdm
+import torch, torchaudio
+
+if torch.cuda.is_available():
+    device = 'cuda'
+else:
+    device = 'cpu'
 
 def check_argv():
     parser = argparse.ArgumentParser()
@@ -29,13 +34,14 @@ def main(args):
         out_wavs += out_wav_path.rglob('*.' + extension)
 
     model = utmosv2.create_model(pretrained=True)
+    model = model.to(device)
     scores = []
 
     for index, out_wav_path in tqdm(enumerate(out_wavs), total=len(out_wavs)):
         if args.length_limit != -1 and index > args.length_limit:
             break
         out_wav, sr = torchaudio.load(str(out_wav_path), backend='sox')
-        scores.append(model.predict(data=out_wav, sr=sr).item())
+        scores.append(model.predict(data=out_wav.to(device), sr=sr).item())
 
     print("UTMOS v2 score: ", sum(scores) / len(scores))
 

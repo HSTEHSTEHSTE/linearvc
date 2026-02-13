@@ -44,7 +44,7 @@ def main(args):
             wavs += (converted_dir / spk).rglob('*.' + extension)
 
         for wav in tqdm(wavs):
-            wav, sr = torchaudio.load(wav)
+            wav, sr = torchaudio.load(str(wav))
             embed = classifier.encode_batch(wav).squeeze(0).squeeze(0).cpu().numpy()
             embeds.append(embed)
 

@@ -2,7 +2,7 @@
 training:
   # Training parameters
   project_name: LinearVC_CF-TTS
-  run_name: v2.3
+  run_name: v2.10
   epochs: 100000
   num_workers: 16
   max_frames_per_batch: 11200000 # 5 min todo fix
@@ -23,7 +23,7 @@ training:
   log_every: 100
 
   # Checkpoint managedment
-  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v2.3
+  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v2.10
   save_every_steps: 2000
   save_every_epochs: 1
   num_ckpt_best_loss: 3
@@ -37,7 +37,7 @@ optim:
   weight_decay: 1.0e-6
   scheduler_type: '0'
   scheduler_args:
-    factor: 1.0
+    factor: 0.1
     total_iters: 1000
 
 
@@ -97,23 +97,23 @@ data:
   text_tokenizer:
     type: phone  # spm, phone
     pre_phonemized: false
-    # tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/m_8000.model
+    # tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/spm/m_2000.model
     tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/phones_espeak.json
   train:
     dataset: 'commonvoice' # librispeech, commonvoice
     # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_phones.pkl
     load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_cv.pkl
+    # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_cv_whisper.pkl
     # librispeech_subsets:
     #   - train-clean-100
     #   - train-clean-360
     #   - train-other-500
-    # librispeech_subsets:
-    #   - dev-clean
     commonvoice_subsets:
       - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/train.tsv
-
+      # - /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/clips/train.tsv
     epoch_batch_limit: -1
     shuffle_batches: true
+    shuffle_batches_between_epochs: true
   dev:
     dataset: 'commonvoice' # librispeech, commonvoice
     load_path: null
@@ -122,8 +122,10 @@ data:
     #   # - dev-other
     commonvoice_subsets:
       - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/dev.tsv
+      # - /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/clips/dev.tsv
     epoch_batch_limit: 100
     shuffle_batches: true
+    shuffle_batches_between_epochs: false
   # librispeech_audio_path: /home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech
   # librispeech_transcript_path: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/orig_phones
   commonvoice_root_path: /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/commonvoice/en

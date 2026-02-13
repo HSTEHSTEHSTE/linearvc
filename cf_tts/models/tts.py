@@ -443,6 +443,8 @@ class ZipVoice(nn.Module):
             torch.zeros_like(speech_condition),
             speech_condition,
         )
+        if self.mask_text:
+            text_condition = torch.where(speech_condition_mask.unsqueeze(-1), text_condition, 0)
 
         x0 = torch.randn(
             batch_size,

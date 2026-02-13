@@ -161,7 +161,7 @@ def main():
         current_step = -1
         current_epoch = 0
 
-    scheduler = get_scheduler(cfg['optim']['scheduler_type'], optimizer, current_epoch - 1, cfg['optim']['scheduler_args'])
+    scheduler = get_scheduler(cfg['optim']['scheduler_type'], optimizer, -1, cfg['optim']['scheduler_args'])
 
     scaler = create_grad_scaler()
 

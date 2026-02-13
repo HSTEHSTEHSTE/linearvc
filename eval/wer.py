@@ -1,6 +1,7 @@
 import argparse
 import jiwer
 from pathlib import Path
+from whisper_normalizer.english import EnglishTextNormalizer
 
 def check_argv():
     parser = argparse.ArgumentParser()
@@ -23,6 +24,8 @@ def check_argv():
     return parser.parse_args()
 
 def main(args):
+    english_normalizer = EnglishTextNormalizer()
+
     ref_transcript_dir = Path(args.ref_transcript_dir)
     out_transcript_dir = Path(args.out_transcript_dir)
 
@@ -39,13 +42,13 @@ def main(args):
                 for line in ref_transcript_file:
                     line = line.strip()
                     line_elements = line.split('|')
-                    ref_transcripts[line_elements[0]] = line_elements[1].strip()
+                    ref_transcripts[line_elements[0]] = english_normalizer(line_elements[1].strip())
             out_transcripts = {}
             with open(out_transcript_dir / (spk + '.txt')) as out_transcript_file:
                 for line in out_transcript_file:
                     line = line.strip()
                     line_elements = line.split('|')
-                    out_transcripts[line_elements[0]] = line_elements[1].strip()
+                    out_transcripts[line_elements[0]] = english_normalizer(line_elements[1].strip())
             for utt in out_transcripts:
                 wer = jiwer.wer(ref_transcripts[utt], out_transcripts[utt])
                 wers_spk.append(wer)
