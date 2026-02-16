@@ -2,7 +2,7 @@
 training:
   # Training parameters
   project_name: LinearVC_CF-TTS
-  run_name: v0.32
+  run_name: v0.33
   epochs: 100000
   num_workers: 16
   max_frames_per_batch: 11200000 # 5 min todo fix
@@ -23,7 +23,7 @@ training:
   log_every: 100
 
   # Checkpoint managedment
-  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v0.32
+  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v0.33
   save_every_steps: 2000
   save_every_epochs: 1
   num_ckpt_best_loss: 3
@@ -86,7 +86,7 @@ model:
 
       feat_dim: 75
 
-      vocab_size: 80 # pre_phonemized: 39, otherwise 80
+      vocab_size: 2000 # pre_phonemized: 39, otherwise 80
       
       mask_ratio_min: 1.0
       mask_ratio_max: 1.0
@@ -95,14 +95,15 @@ model:
 # data
 data:
   text_tokenizer:
-    type: phone  # spm, phone
+    type: spm  # spm, phone
     pre_phonemized: false
-    # tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/spm/m_2000.model
-    tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/phones_espeak.json
+    tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/spm/m_2000.model
+    # tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/phones_espeak.json
   train:
     dataset: 'librispeech' # librispeech, commonvoice
     # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_phones.pkl
-    load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_phones_espeak.pkl
+    # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_phones_espeak.pkl
+    load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set.pkl
     # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_cv.pkl
     # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_cv_whisper.pkl
     librispeech_subsets:

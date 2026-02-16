@@ -687,7 +687,7 @@ def format_time(start_time, end_time):
     return str(td)
 
 
-def get_speaker_feats(tgt_speaker_root, linearvc_model, extensions=['wav', 'mp3', 'flac']):
+def get_speaker_feats(tgt_speaker_root, linearvc_model, device, extensions=['wav', 'mp3', 'flac']):
     tgt_speaker_root = Path(tgt_speaker_root)
     wavs = []
     for extension in extensions:
@@ -720,3 +720,5 @@ def match_knn(input_features, transform, k=4):
     input_features = torch.mean(input_features, dim=1) # [b * t, d]
     input_features = input_features.view(batch_size, -1, input_features.shape[-1])
     return input_features
+
+

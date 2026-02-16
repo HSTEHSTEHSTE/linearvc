@@ -14,7 +14,7 @@ from pyannote.audio import Pipeline
 from linearvc import linearvc
 from linearvc.cf_tts.models.tts import ZipVoice
 
-from linearvc.cf_tts.utils.common import normalize_input, invert_normalized_input, load_config
+from linearvc.cf_tts.utils.common import normalize_input, invert_normalized_input, load_config, get_speaker_feats
 from linearvc.cf_tts.utils.checkpoints import load_checkpoint
 
 
@@ -80,7 +80,8 @@ def main():
         from cuvs.neighbors import brute_force
         feats = get_speaker_feats(
             tgt_speaker_root=cfg['training']['content_factorization']['factorization_speaker'],
-            linearvc_model=linearvc_model
+            linearvc_model=linearvc_model,
+            device=device
         )
         index = brute_force.build(feats)
         transform = {
@@ -136,6 +137,7 @@ def main():
         if 'prompt_audio' in inference_item:
             assert len(inference_item['prompt_transcript']) > 0
             wav, sr = torchaudio.load(str(inference_item['prompt_audio']), backend='sox')
+            # wav, sr = torchaudio.load(str(inference_item['prompt_audio']), backend='soundfile')
             if sr != 16000:
                 if sr not in resamplers:
                     resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)

@@ -23,11 +23,13 @@ class TTSDatum:
         text: str,
         speaker_id: str,
         num_frames: int,
+        accent: str = None,
     ):
         self.wav_path = wav_path
         self.text = text
         self.speaker_id = speaker_id
         self.num_frames = num_frames
+        self.accent = accent
 
 
 class TTSDataset(Dataset):
@@ -83,13 +85,21 @@ class TTSDataset(Dataset):
                     print("Processing ", subset_file)
                     subset_df = pd.read_csv(subset_file, sep='|', header=0, index_col=None, quoting=3)
                     for entry in tqdm(subset_df.iterrows(), total=subset_df.shape[0]):
-                        self.data.append(TTSDatum(
-                            wav_path=audio_root / entry[1].path,
-                            text=entry[1]['sentence'],
-                            speaker_id=entry[1]['client_id'],
-                            num_frames=int(entry[1]['duration'] * 16000)
-                        ))
-            
+                        if self.config['data']['accent']['use_accent']:
+                            self.data.append(TTSDatum(
+                                wav_path=audio_root / entry[1].path,
+                                text=entry[1]['sentence'],
+                                speaker_id=entry[1]['client_id'],
+                                num_frames=int(entry[1]['duration'] * 16000),
+                                accent=entry[1]['accents']
+                            ))
+                        else:
+                            self.data.append(TTSDatum(
+                                wav_path=audio_root / entry[1].path,
+                                text=entry[1]['sentence'],
+                                speaker_id=entry[1]['client_id'],
+                                num_frames=int(entry[1]['duration'] * 16000)
+                            ))
             self.data.sort(key=lambda x: x.num_frames)
 
     # -------------------------
@@ -119,6 +129,7 @@ class TTSDataset(Dataset):
             "wav": wav,
             "text": item.text,
             "speaker": item.speaker_id,
+            "accent": item.accent
         }
 
 
@@ -238,11 +249,21 @@ class TTS_Collate:
                         words_mismatch='ignore'
                     )
                 self.phonemize = backend.phonemize
+        
+        # accent tokenizer
+        self.use_accent = cfg['data']['accent']['use_accent']
+        if self.use_accent:
+            with open(cfg['data']['accent']['accent_file'], 'r') as file:
+                self.accents = json.load(file)['accents']
+            self.accent_to_id = {}
+            for index, accent in enumerate(self.accents):
+                self.accent_to_id[accent] = index
+
 
     def __call__(self, batch: List[Dict]):
         wavs = [b["wav"] for b in batch]
         speakers = [b["speaker"] for b in batch]
-        texts_raw = [b["text"] for b in batch]
+        texts_raw = [str(b["text"]) for b in batch]
         texts = []
         if self.tokenizer_type == 'spm':
             for text_raw in texts_raw:
@@ -258,7 +279,12 @@ class TTS_Collate:
                 phones = [phone.replace('- ', '-').replace(' ', '-').split('-') for phone in phones]
                 for text in phones:
                     texts.append([self.text_tokenizer[token] for token in text if token in self.text_tokenizer])
-                    
+
+        if self.use_accent:
+            accents_raw = [b["accent"] for b in batch]
+            accents = [self.accent_to_id[accent] for accent in accents_raw]
+        else:
+            accents = []
 
         lengths = torch.tensor([w.size(0) for w in wavs])
         max_len = max(lengths)
@@ -272,6 +298,7 @@ class TTS_Collate:
             "wav_lengths": lengths,
             "text": texts,
             "speaker": speakers,
+            "accent": accents,
         }
     
     

@@ -31,6 +31,7 @@ def validation_pass(dev_loader, linearvc_model, transform, cfg, model, device, s
         wav_lengths = batch["wav_lengths"]
         text_ids = batch["text"]                  # list[str]
         speakers = batch["speaker"]               # list[str]
+        accents = batch["accent"]
 
         with torch.no_grad():
             input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
@@ -53,6 +54,7 @@ def validation_pass(dev_loader, linearvc_model, transform, cfg, model, device, s
                 features_lens=wav_lengths,
                 noise=cfg['training']['noise_scale'] * torch.randn_like(input_features).to(device), # Note: noise added to features. Not uniform random noise
                 t=torch.rand(input_features.shape[0], 1, 1, device=device),
+                accents=accents,
                 condition_drop_ratio=0.
             )
 
@@ -231,8 +233,9 @@ def main():
                 break
             wavs = batch["wav"].to(device)            # (B, T)
             wav_lengths = batch["wav_lengths"]
-            text_ids = batch["text"]                     # list[str]
+            text_ids = batch["text"]                  # list[str]
             speakers = batch["speaker"]               # list[str]
+            accents = batch["accent"]
 
             with torch.no_grad():
                 input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
@@ -263,6 +266,7 @@ def main():
                 tokens=text_ids,
                 features=input_features,
                 features_lens=wav_lengths,
+                accents=accents,
                 noise=cfg['training']['noise_scale'] * torch.randn_like(input_features).to(device), # Note: noise added to features. Not uniform random noise
                 t=torch.rand(input_features.shape[0], 1, 1, device=device),
                 condition_drop_ratio=cfg['training']['condition_drop_ratio']

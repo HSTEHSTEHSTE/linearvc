@@ -36,12 +36,16 @@ class ZipVoice(nn.Module):
         value_head_dim: int = 12,
         pos_head_dim: int = 4,
         pos_dim: int = 48,
+        text_feat_dim: int = 100,
         feat_dim: int = 100,
         vocab_size: int = 26,
         pad_id: int = 0,
         mask_ratio_min: float = 1.0,
         mask_ratio_max: float = 1.0,
-        mask_text: bool = False
+        mask_text: bool = False,
+        use_accent: bool = False,
+        accent_vocab_size: int = 14,
+        accent_dim: int = 100,
     ):
         """
         Initialize the model with specified configuration parameters.
@@ -77,8 +81,15 @@ class ZipVoice(nn.Module):
         """
         super().__init__()
 
+        self.use_accent = use_accent
+        if use_accent:
+            in_dim = feat_dim * 2 + text_feat_dim + accent_dim
+            self.accent_embed = nn.Embedding(accent_vocab_size, accent_dim)
+        else:
+            in_dim = feat_dim * 2 + text_feat_dim
+
         self.fm_decoder = TTSZipformer(
-            in_dim=feat_dim * 3,
+            in_dim=in_dim,
             out_dim=feat_dim,
             downsampling_factor=fm_decoder_downsampling_factor,
             num_encoder_layers=fm_decoder_num_layers,
@@ -96,7 +107,7 @@ class ZipVoice(nn.Module):
 
         self.text_encoder = TTSZipformer(
             in_dim=text_embed_dim,
-            out_dim=feat_dim,
+            out_dim=text_feat_dim,
             downsampling_factor=1,
             num_encoder_layers=text_encoder_num_layers,
             cnn_module_kernel=text_encoder_cnn_module_kernel,
@@ -126,6 +137,7 @@ class ZipVoice(nn.Module):
         xt: torch.Tensor,
         text_condition: torch.Tensor,
         speech_condition: torch.Tensor,
+        accent_condition: torch.Tensor = None,
         padding_mask: Optional[torch.Tensor] = None,
         guidance_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -148,7 +160,10 @@ class ZipVoice(nn.Module):
             predicted velocity, with the shape (batch, seq_len, emb_dim).
         """
 
-        xt = torch.cat([xt, text_condition, speech_condition], dim=2)
+        if accent_condition is not None:
+            xt = torch.cat([xt, text_condition, speech_condition, accent_condition], dim=2)
+        else:
+            xt = torch.cat([xt, text_condition, speech_condition], dim=2)
 
         assert t.dim() in (0, 3)
         # Handle t with the shape (N, 1, 1):
@@ -324,6 +339,7 @@ class ZipVoice(nn.Module):
         features_lens: torch.Tensor,
         noise: torch.Tensor,
         t: torch.Tensor,
+        accents: List[int] = None,
         condition_drop_ratio: float = 0.0,
     ) -> torch.Tensor:
         """Forward pass of the model for training.
@@ -352,6 +368,10 @@ class ZipVoice(nn.Module):
         if self.mask_text:
             text_condition = torch.where(speech_condition_mask.unsqueeze(-1), text_condition, 0)
         speech_condition = torch.where(speech_condition_mask.unsqueeze(-1), 0, features)
+        if self.use_accent:
+            accent_condition = self.accent_embed(torch.tensor(accents).to(speech_condition.device)).unsqueeze(1).expand(-1, text_condition.shape[1], -1)
+        else:
+            accent_condition = None
 
         if condition_drop_ratio > 0.0:
             drop_mask = (
@@ -368,6 +388,7 @@ class ZipVoice(nn.Module):
             xt=xt,
             text_condition=text_condition,
             speech_condition=speech_condition,
+            accent_condition=accent_condition,
             padding_mask=padding_mask,
         )
 
