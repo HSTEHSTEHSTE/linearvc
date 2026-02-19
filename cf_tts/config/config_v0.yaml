@@ -2,13 +2,13 @@
 training:
   # Training parameters
   project_name: LinearVC_CF-TTS
-  run_name: v0.33
+  run_name: v0.36
   epochs: 100000
   num_workers: 16
-  max_frames_per_batch: 11200000 # 5 min todo fix
+  max_frames_per_batch: 6500000 # 5 min todo fix
   random_seed: 42
   content_factorization: 
-    type: content # content, speaker
+    type: none # content, speaker, none
     content_factorization_file: /home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/librispeech_dev-clean/rank_75/src_1272/transforms.npy # only used when type=content
     factorization_speaker: /home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/dev-clean/1272 # only used when type=speaker
   condition_drop_ratio: 0.0
@@ -23,7 +23,7 @@ training:
   log_every: 100
 
   # Checkpoint managedment
-  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v0.33
+  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v0.36
   save_every_steps: 2000
   save_every_epochs: 1
   num_ckpt_best_loss: 3
@@ -37,7 +37,7 @@ optim:
   weight_decay: 1.0e-6
   scheduler_type: '0'
   scheduler_args:
-    factor: 0.5
+    factor: 0.1
     total_iters: 1000
 
 
@@ -84,34 +84,37 @@ model:
       time_embed_dim: 192
       text_embed_dim: 192
 
-      feat_dim: 75
+      text_feat_dim: 1024
+      feat_dim: 1024
 
-      vocab_size: 2000 # pre_phonemized: 39, otherwise 80
+      vocab_size: 80 # pre_phonemized: 39, otherwise 80
       
-      mask_ratio_min: 1.0
+      mask_ratio_min: 0.2
       mask_ratio_max: 1.0
       mask_text: False
+
+      use_accent: False
+      accent_vocab_size: 14
+      accent_dim: 100
 
 # data
 data:
   text_tokenizer:
-    type: spm  # spm, phone
+    type: phone  # spm, phone
     pre_phonemized: false
-    tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/spm/m_2000.model
-    # tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/phones_espeak.json
+    # tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/spm/m_2000.model
+    tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/phones_espeak.json
+  accent:
+    use_accent: False
+    accent_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/spm/accents.json
   train:
     dataset: 'librispeech' # librispeech, commonvoice
-    # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_phones.pkl
-    # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_phones_espeak.pkl
-    load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set.pkl
-    # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_cv.pkl
-    # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_cv_whisper.pkl
+    load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_accent.pkl
     librispeech_subsets:
       - train-clean-100
       - train-clean-360
       - train-other-500
     # commonvoice_subsets:
-      # - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/train.tsv
       # - /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/clips/train.tsv
     epoch_batch_limit: -1
     shuffle_batches: true
@@ -123,7 +126,6 @@ data:
       - dev-clean
       # - dev-other
     # commonvoice_subsets:
-    #   # - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/dev.tsv
     #   - /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/clips/dev.tsv
     epoch_batch_limit: 100
     shuffle_batches: true

@@ -2,7 +2,7 @@
 training:
   # Training parameters
   project_name: LinearVC_CF-TTS
-  run_name: v2.12
+  run_name: v2.15
   epochs: 100000
   num_workers: 16
   max_frames_per_batch: 6500000 # 5 min todo fix
@@ -23,7 +23,7 @@ training:
   log_every: 100
 
   # Checkpoint managedment
-  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v2.12
+  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v2.15
   save_every_steps: 2000
   save_every_epochs: 1
   num_ckpt_best_loss: 3
@@ -33,7 +33,7 @@ training:
 
 # optimizer and scheduler
 optim:
-  lr: 1.0e-4
+  lr: 5.0e-5
   weight_decay: 1.0e-6
   scheduler_type: '0'
   scheduler_args:
@@ -84,7 +84,7 @@ model:
       time_embed_dim: 192
       text_embed_dim: 192
 
-      text_feat_dim: 256
+      text_feat_dim: 75
       feat_dim: 75
 
       vocab_size: 80 # pre_phonemized: 39, otherwise 80
@@ -109,17 +109,12 @@ data:
     accent_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/spm/accents.json
   train:
     dataset: 'commonvoice' # librispeech, commonvoice
-    # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_phones.pkl
-    # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_cv_accent.pkl
     load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_cv.pkl
-    # load_path: /home/hltcoe/xli/ARTS/linearvc/exp/tts/data/train_set_cv_whisper.pkl
     # librispeech_subsets:
     #   - train-clean-100
     #   - train-clean-360
     #   - train-other-500
     commonvoice_subsets:
-      # - /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/clips/accents/train.tsv
-      # - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/train.tsv
       - /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/clips/train.tsv
     epoch_batch_limit: -1
     shuffle_batches: true
@@ -131,8 +126,6 @@ data:
     #   - dev-clean
     #   # - dev-other
     commonvoice_subsets:
-      # - /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/clips/accents/dev.tsv
-      # - /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/dev.tsv
       - /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/clips/dev.tsv
     epoch_batch_limit: 100
     shuffle_batches: true

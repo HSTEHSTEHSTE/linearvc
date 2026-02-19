@@ -40,6 +40,8 @@ def validation_pass(dev_loader, linearvc_model, transform, cfg, model, device, s
                     input_features = torch.matmul(input_features, transform)
             elif cfg['training']['content_factorization']['type'] == 'speaker':
                 input_features = match_knn(input_features)
+            elif cfg['training']['content_factorization']['type'] == 'none':
+                pass
             input_features = input_features * cfg['training']['feature_scale']
             if cfg['training']['normalize_input']:
                 input_features = normalize_input(input_features)
@@ -74,6 +76,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint_path", default='')
+    parser.add_argument("--ignore_current_step", default=False)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -162,8 +165,13 @@ def main():
     else:
         current_step = -1
         current_epoch = 0
+    if args.ignore_current_step:
+        current_step = -1
+        current_epoch = 0
 
     scheduler = get_scheduler(cfg['optim']['scheduler_type'], optimizer, -1, cfg['optim']['scheduler_args'])
+    current_lr = optimizer.param_groups[0]['lr']
+    print(f"Current learning rate: {current_lr}")
 
     scaler = create_grad_scaler()
 
@@ -194,7 +202,8 @@ def main():
         from cuvs.neighbors import brute_force
         feats = get_speaker_feats(
             tgt_speaker_root=cfg['training']['content_factorization']['factorization_speaker'],
-            linearvc_model=linearvc_model
+            linearvc_model=linearvc_model,
+            device=device
         )
         index = brute_force.build(feats)
         transform = {
@@ -202,6 +211,8 @@ def main():
             'index': index,
             'brute_force': brute_force
         }
+    elif cfg['training']['content_factorization']['type'] == 'none':
+        transform = None
 
 
     # -------------------------
@@ -253,6 +264,8 @@ def main():
                     input_features = input_features.view(-1, 4, input_features.shape[-1]) # [b * t, k, d]
                     input_features = torch.mean(input_features, dim=1) # [b * t, d]
                     input_features = input_features.view(batch_size, -1, input_features.shape[-1])
+                elif cfg['training']['content_factorization']['type'] == 'none':
+                    pass
                 input_features = input_features * cfg['training']['feature_scale']
                 if cfg['training']['normalize_input']:
                     input_features = normalize_input(input_features)

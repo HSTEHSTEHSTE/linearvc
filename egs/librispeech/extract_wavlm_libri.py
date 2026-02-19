@@ -84,7 +84,7 @@ def main(args):
         for wav_fn in tqdm(sorted(speaker_dir.rglob("*/*.flac")), leave=False):
             if wav_fn.stem in exclude_utterances:
                 continue
-            wav, _ = torchaudio.load(wav_fn)
+            wav, _ = torchaudio.load(str(wav_fn))
             wav = wav.to(device)
             with torch.inference_mode():
                 x, _ = wavlm.extract_features(wav, output_layer=6)
