@@ -25,7 +25,7 @@ def check_argv():
     parser.add_argument(
         "--timit_dir",
         type=Path,
-        help="TIMIT directory ending in e.g. `dev-clean/`",
+        help="TIMIT directory ending in e.g. `TRAIN`, 'TEST'",
     )
     parser.add_argument(
         "--output_dir",
@@ -48,13 +48,28 @@ def check_argv():
         help="save mode: 'spks' or 'utts'",
         default='utts',
     )
+    parser.add_argument(
+        "--feature_type",
+        type=str,
+        help='wavlm, contentvec',
+        default='wavlm'
+    )
     return parser.parse_args()
 
 
 def main(args):
-    wavlm = torch.hub.load(
-        "bshall/knn-vc", "wavlm_large", trust_repo=True, device=device
-    )
+    if args.feature_type == 'wavlm':
+        wavlm = torch.hub.load(
+            "bshall/knn-vc", "wavlm_large", trust_repo=True, device=device
+        )
+    elif args.feature_type == 'contentvec':
+        from transformers import HubertModel
+        import torch.nn as nn
+        class HubertModelWithFinalProj(HubertModel):
+            def __init__(self, config):
+                super().__init__(config)
+                self.final_proj = nn.Linear(config.hidden_size, config.classifier_proj_size)
+        model = HubertModelWithFinalProj.from_pretrained("lengyue233/content-vec-best").to(device)
 
     if args.pca is not None:
         print("Reading:", args.pca)
@@ -88,10 +103,14 @@ def main(args):
             continue
         wav_elements = str(wav_file).split('/')
         speaker = wav_elements[-2]
-        wav, sr = torchaudio.load(wav_file)
+        wav, sr = torchaudio.load(str(wav_file))
         wav = wav.to(device)
-        with torch.inference_mode():
-            x, _ = wavlm.extract_features(wav, output_layer=6)
+        if args.feature_type == 'wavlm':
+            with torch.inference_mode():
+                x, _ = wavlm.extract_features(wav, output_layer=6)
+        elif args.feature_type == 'contentvec':
+            with torch.inference_mode():
+                x = model(wav)["last_hidden_state"]
         if pca is not None:
             x = pca_transform(
                 x, pca["mean"], pca["components"], pca["explained_variance"]

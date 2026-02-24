@@ -33,6 +33,12 @@ def check_argv():
         type=str,
         default='none',
     )
+    parser.add_argument(
+        "--set",
+        type=str,
+        help="librispeech, cv",
+        default="librispeech"
+    )
     return parser.parse_args()
 
 def main(args):
@@ -40,6 +46,7 @@ def main(args):
     print("Out transcript dir: ", args.out_transcript_dir)
     print("Whisper Model: ", args.whisper_model)
     converted_dir = Path(args.converted_dir)
+    
     if args.anchor_spk == 'none':
         out_transcript_dir = Path(args.out_transcript_dir)
     else:
@@ -50,19 +57,32 @@ def main(args):
 
     model = whisper.load_model(args.whisper_model, device="cuda")
 
-    spks = list(converted_dir.iterdir())
-    for spk in tqdm(spks):
+    if args.set == 'librispeech':
+        spks = list(converted_dir.iterdir())
+        for spk in tqdm(spks):
+            wavs = []
+            transcripts = {}
+            for extension in extensions:
+                wavs += (converted_dir / spk).rglob('*.' + extension)
+
+            for wav in tqdm(wavs):
+                if args.anchor_spk == 'none' or wav.parts[-2] == args.anchor_spk:
+                    transcript = model.transcribe(str(wav), language="english")
+                    transcripts[wav.stem] = transcript['text']
+
+            with open(out_transcript_dir / (spk.stem + '.txt'), 'w') as out_transcript_file:
+                for transcript in transcripts:
+                    out_transcript_file.write(transcript + '|' + transcripts[transcript] + '\n')
+    elif args.set == 'cv':
         wavs = []
         transcripts = {}
         for extension in extensions:
-            wavs += (converted_dir / spk).rglob('*.' + extension)
-
+            wavs += list(converted_dir.rglob('*.' + extension))
         for wav in tqdm(wavs):
             if args.anchor_spk == 'none' or wav.parts[-2] == args.anchor_spk:
                 transcript = model.transcribe(str(wav), language="english")
-                transcripts[wav.stem] = transcript['text']
-
-        with open(out_transcript_dir / (spk.stem + '.txt'), 'w') as out_transcript_file:
+                transcripts[wav.relative_to(converted_dir)] = transcript['text']
+        with open(out_transcript_dir / ('out.txt'), 'w') as out_transcript_file:
             for transcript in transcripts:
                 out_transcript_file.write(transcript + '|' + transcripts[transcript] + '\n')
 

@@ -53,13 +53,35 @@ def main():
         trust_repo=True,
         device=device
     )
-    hifigan, _ = torch.hub.load(
-        "bshall/knn-vc",
-        "hifigan_wavlm",
-        trust_repo=True,
-        prematched=True,
-        device=device
-    )
+    if cfg["model"]["hifigan_path"] == 'none':
+        hifigan, _ = torch.hub.load(
+            "bshall/knn-vc",
+            "hifigan_wavlm",
+            trust_repo=True,
+            prematched=True,
+            device=device
+        )
+    else:
+        import os, json
+        from linearvc.hifigan.models import Generator
+        class AttrDict(dict):
+            def __init__(self, *args, **kwargs):
+                super(AttrDict, self).__init__(*args, **kwargs)
+                self.__dict__ = self
+        def load_hifigan_checkpoint(filepath, device):
+            assert os.path.isfile(filepath)
+            print("Loading '{}'".format(filepath))
+            checkpoint_dict = torch.load(filepath, map_location=device)
+            print("Complete.")
+            return checkpoint_dict
+        config_file = os.path.join(os.path.split(cfg["model"]["hifigan_path"])[0], 'config.json')
+        with open(config_file) as f:
+            data = f.read()
+        json_config = json.loads(data)
+        h = AttrDict(json_config)
+        hifigan = Generator(h).to(device)
+        state_dict_g = load_hifigan_checkpoint(cfg["model"]["hifigan_path"], device)
+        hifigan.load_state_dict(state_dict_g['generator'])
     linearvc_model = linearvc.LinearVC(wavlm, hifigan, device)
 
     # -------------------------
@@ -95,7 +117,8 @@ def main():
         from cuvs.neighbors import brute_force
         feats = get_speaker_feats(
             tgt_speaker_root=cfg['training']['content_factorization']['factorization_speaker'],
-            linearvc_model=linearvc_model
+            linearvc_model=linearvc_model,
+            device=device
         )
         index = brute_force.build(feats)
         transform = {
@@ -116,7 +139,13 @@ def main():
             }
         else:
             transform_tgt = None
-
+    elif cfg['training']['content_factorization']['type'] == 'none':
+        transform = None
+        transform_tgt = None
+    elif cfg['training']['content_factorization']['type'] == 'fbank':
+        from speechbrain.lobes.features import Fbank
+        transform = Fbank(sample_rate=16000, n_mels=cfg['model']['tts']['zipvoice']['feat_dim'])
+        transform_tgt = transform
 
     # -------------------------
     # load and process prompt
@@ -136,12 +165,17 @@ def main():
             wav = torchaudio.functional.vad(wav, sr)
             wav, sr = torchaudio.sox_effects.apply_effects_tensor(wav, sr, effects)
         wavs = wav.to(device)
-        prompt_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
-        if transform is not None:
-            if cfg['training']['content_factorization']['type'] == 'content':
-                prompt_features = torch.matmul(prompt_features, transform)
-            elif cfg['training']['content_factorization']['type'] == 'speaker':
-                prompt_features = match_knn(prompt_features, transform)
+        if cfg['training']['content_factorization']['type'] == 'fbank':
+            prompt_features = transform(wavs)
+        else:
+            prompt_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
+            if transform is not None:
+                if cfg['training']['content_factorization']['type'] == 'content':
+                    prompt_features = torch.matmul(prompt_features, transform)
+                elif cfg['training']['content_factorization']['type'] == 'speaker':
+                    prompt_features = match_knn(prompt_features, transform)
+                elif cfg['training']['content_factorization']['type'] == 'none':
+                    pass
         prompt_features = prompt_features * cfg['training']['feature_scale']
         if cfg['training']['normalize_input']:
             prompt_features = normalize_input(prompt_features)
@@ -236,6 +270,8 @@ def main():
                 out_feats = torch.matmul(out_feats, transform_tgt)
             elif cfg['training']['content_factorization']['type'] == 'speaker':
                 out_feats = match_knn(out_feats, transform_tgt)
+            elif cfg['training']['content_factorization']['type'] == 'none':
+                pass
         audio = linearvc_model.hifigan(out_feats)
 
     audio = audio.squeeze().cpu()

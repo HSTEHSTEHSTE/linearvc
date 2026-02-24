@@ -34,20 +34,26 @@ def validation_pass(dev_loader, linearvc_model, transform, cfg, model, device, s
         accents = batch["accent"]
 
         with torch.no_grad():
-            input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
-            if cfg['training']['content_factorization']['type'] == 'content':
-                if transform is not None:
-                    input_features = torch.matmul(input_features, transform)
-            elif cfg['training']['content_factorization']['type'] == 'speaker':
-                input_features = match_knn(input_features)
-            elif cfg['training']['content_factorization']['type'] == 'none':
-                pass
+            if cfg['training']['content_factorization']['type'] == 'fbank':
+                input_features = transform(wavs) # [b, t, d]
+            else:
+                input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
+                if cfg['training']['content_factorization']['type'] == 'content':
+                    if transform is not None:
+                        input_features = torch.matmul(input_features, transform)
+                elif cfg['training']['content_factorization']['type'] == 'speaker':
+                    input_features = match_knn(input_features, transform)
+                elif cfg['training']['content_factorization']['type'] == 'none':
+                    pass
             input_features = input_features * cfg['training']['feature_scale']
             if cfg['training']['normalize_input']:
                 input_features = normalize_input(input_features)
             input_features = input_features.detach()
 
-            wav_lengths = (torch.floor((wav_lengths - 400) / 320) + 1).to(device)
+            if cfg['training']['content_factorization']['type'] == 'fbank':
+                wav_lengths = torch.full([input_features.shape[0]], input_features.shape[1]).to(device)
+            else:
+                wav_lengths = (torch.floor((wav_lengths - 400) / 320) + 1).to(device)
 
             # forward
             loss = model(
@@ -213,6 +219,9 @@ def main():
         }
     elif cfg['training']['content_factorization']['type'] == 'none':
         transform = None
+    elif cfg['training']['content_factorization']['type'] == 'fbank':
+        from speechbrain.lobes.features import Fbank
+        transform = Fbank(sample_rate=16000, n_mels=cfg['model']['tts']['zipvoice']['feat_dim'])
 
 
     # -------------------------
@@ -249,29 +258,35 @@ def main():
             accents = batch["accent"]
 
             with torch.no_grad():
-                input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
-                if cfg['training']['content_factorization']['type'] == 'content':
-                    if transform is not None:
-                        input_features = torch.matmul(input_features, transform)
-                elif cfg['training']['content_factorization']['type'] == 'speaker':
-                    # perform knn matching
-                    batch_size = input_features.shape[0] # b
-                    input_features = input_features.view(-1, input_features.shape[-1]) # [b * t, d]
-                    _, neighbors = transform['brute_force'].search(transform['index'], input_features, k=4)
-                    neighbors = torch.as_tensor(neighbors, device='cuda') # [b * t, k]
-                    neighbors = neighbors.view(-1) # [b * t * k]
-                    input_features = transform['feats'].index_select(0, neighbors) # [b * t * k, d]
-                    input_features = input_features.view(-1, 4, input_features.shape[-1]) # [b * t, k, d]
-                    input_features = torch.mean(input_features, dim=1) # [b * t, d]
-                    input_features = input_features.view(batch_size, -1, input_features.shape[-1])
-                elif cfg['training']['content_factorization']['type'] == 'none':
-                    pass
+                if cfg['training']['content_factorization']['type'] == 'fbank':
+                    input_features = transform(wavs) # [b, t, d]
+                else:
+                    input_features, _ = linearvc_model.wavlm.extract_features(wavs, output_layer=6)
+                    if cfg['training']['content_factorization']['type'] == 'content':
+                        if transform is not None:
+                            input_features = torch.matmul(input_features, transform)
+                    elif cfg['training']['content_factorization']['type'] == 'speaker':
+                        # perform knn matching
+                        batch_size = input_features.shape[0] # b
+                        input_features = input_features.view(-1, input_features.shape[-1]) # [b * t, d]
+                        _, neighbors = transform['brute_force'].search(transform['index'], input_features, k=4)
+                        neighbors = torch.as_tensor(neighbors, device='cuda') # [b * t, k]
+                        neighbors = neighbors.view(-1) # [b * t * k]
+                        input_features = transform['feats'].index_select(0, neighbors) # [b * t * k, d]
+                        input_features = input_features.view(-1, 4, input_features.shape[-1]) # [b * t, k, d]
+                        input_features = torch.mean(input_features, dim=1) # [b * t, d]
+                        input_features = input_features.view(batch_size, -1, input_features.shape[-1])
+                    elif cfg['training']['content_factorization']['type'] == 'none':
+                        pass
                 input_features = input_features * cfg['training']['feature_scale']
                 if cfg['training']['normalize_input']:
                     input_features = normalize_input(input_features)
                 input_features = input_features.detach()
 
-            wav_lengths = (torch.floor((wav_lengths - 400) / 320) + 1).to(device)
+            if cfg['training']['content_factorization']['type'] == 'fbank':
+                wav_lengths = torch.full([input_features.shape[0]], input_features.shape[1]).to(device)
+            else:
+                wav_lengths = (torch.floor((wav_lengths - 400) / 320) + 1).to(device)
 
             # forward
             torch.manual_seed(step)

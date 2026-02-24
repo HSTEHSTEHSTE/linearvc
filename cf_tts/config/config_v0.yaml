@@ -2,18 +2,18 @@
 training:
   # Training parameters
   project_name: LinearVC_CF-TTS
-  run_name: v0.36
+  run_name: v0.39
   epochs: 100000
   num_workers: 16
-  max_frames_per_batch: 6500000 # 5 min todo fix
+  max_frames_per_batch: 5000000 # 5 min todo fix
   random_seed: 42
   content_factorization: 
-    type: none # content, speaker, none
+    type: fbank # content, speaker, none, fbank
     content_factorization_file: /home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/librispeech_dev-clean/rank_75/src_1272/transforms.npy # only used when type=content
     factorization_speaker: /home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/dev-clean/1272 # only used when type=speaker
   condition_drop_ratio: 0.0
   noise_scale: 1.0
-  feature_scale: 0.1
+  feature_scale: 1.0
   normalize_input: true
   sampling_steps: 16
   clip_grad_norm: 1.0
@@ -23,7 +23,7 @@ training:
   log_every: 100
 
   # Checkpoint managedment
-  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v0.36
+  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v0.39
   save_every_steps: 2000
   save_every_epochs: 1
   num_ckpt_best_loss: 3
@@ -37,7 +37,7 @@ optim:
   weight_decay: 1.0e-6
   scheduler_type: '0'
   scheduler_args:
-    factor: 0.1
+    factor: 0.5
     total_iters: 1000
 
 
@@ -84,18 +84,21 @@ model:
       time_embed_dim: 192
       text_embed_dim: 192
 
-      text_feat_dim: 1024
-      feat_dim: 1024
+      text_feat_dim: 75
+      feat_dim: 75
 
       vocab_size: 80 # pre_phonemized: 39, otherwise 80
       
-      mask_ratio_min: 0.2
+      mask_ratio_min: 1.0
       mask_ratio_max: 1.0
       mask_text: False
 
       use_accent: False
       accent_vocab_size: 14
       accent_dim: 100
+  # hifigan_path: none
+  hifigan_path: /home/hltcoe/xli/ARTS/knn-vc/hifigan/cp_hifigan/wavlm_fbank/g_00070000.pt
+
 
 # data
 data:
@@ -130,6 +133,7 @@ data:
     epoch_batch_limit: 100
     shuffle_batches: true
     shuffle_batches_between_epochs: false
+  # librispeech_audio_path: /home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech
   librispeech_audio_path: /home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech
   librispeech_transcript_path: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/orig
   commonvoice_root_path: /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/commonvoice/en

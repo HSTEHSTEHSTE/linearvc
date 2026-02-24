@@ -63,7 +63,8 @@ def main(args):
     sources.append(['test-clean_source', 'dev-clean_heldout'])
     sources.append(['dev-clean_heldout', 'test-clean_heldout'])
 
-    ranks = [10, 20, 30, 50, 75, 100]
+    # ranks = [10, 20, 30, 50, 75, 100]
+    ranks = [256, 512, 1024]
 
     source_speech = np.load('linearvc/exp/wavlm_feats/librispeech/dev-clean/1272.npy')
     print("Number of frames: ", source_speech.shape[0])
