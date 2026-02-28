@@ -81,7 +81,7 @@ def main(args):
         for wav in tqdm(wavs):
             if args.anchor_spk == 'none' or wav.parts[-2] == args.anchor_spk:
                 transcript = model.transcribe(str(wav), language="english")
-                transcripts[wav.relative_to(converted_dir)] = transcript['text']
+                transcripts[str(wav.relative_to(converted_dir))] = transcript['text']
         with open(out_transcript_dir / ('out.txt'), 'w') as out_transcript_file:
             for transcript in transcripts:
                 out_transcript_file.write(transcript + '|' + transcripts[transcript] + '\n')

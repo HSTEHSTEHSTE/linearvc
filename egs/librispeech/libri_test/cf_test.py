@@ -1,4 +1,4 @@
-import argparse, json, random
+import argparse, json
 import torch, torchaudio
 import numpy as np
 import pandas as pd
@@ -26,11 +26,6 @@ def check_argv():
         "--num_utt_per_speaker",
         type=int,
         default=20,
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=41,
     )
     parser.add_argument(
         "--set_num",
@@ -76,8 +71,6 @@ def main(args):
     librispeech_root = Path(args.librispeech_root)
     out_dir = Path(args.out_dir) / str(args.set_num)
     feat_path = Path(args.feat_path)
-
-    random.seed(args.seed)
 
     with open('linearvc/egs/librispeech/libri_test/speakers.json', 'r') as file:
         speakers = json.load(file)

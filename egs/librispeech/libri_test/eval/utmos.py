@@ -47,7 +47,7 @@ def main(args):
             break
         if args.anchor_spk == 'none' or out_wav_path.parts[-2] == args.anchor_spk:
             out_wav, sr = torchaudio.load(str(out_wav_path), backend='sox')
-            scores.append(model.predict(data=out_wav.to(device), sr=sr).item())
+            scores.append(model.predict(data=out_wav, sr=sr).item())
 
     print("UTMOS v2 score: ", sum(scores) / len(scores))
 

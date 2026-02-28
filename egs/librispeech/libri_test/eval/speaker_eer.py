@@ -33,6 +33,12 @@ def check_argv():
         type=str,
         default='none',
     )
+    parser.add_argument(
+        "--set",
+        type=str,
+        help="librispeech, cv",
+        default="librispeech"
+    )
     return parser.parse_args()
 
 def eer(y, y_score):
@@ -74,28 +80,45 @@ def main(args):
     desims = []
     target_spks = []
     for out_emb_dir in tqdm(out_embs):
-        if args.anchor_spk == 'none' or out_emb_dir.parts[-2] == args.anchor_spk:
-            target_spk = out_emb_dir.stem.split('_')[-1]
-            if target_spk not in target_spks:
-                target_spks.append(target_spk)
-            out_emb = np.load(out_emb_dir)
-            if args.anchor_spk == 'none':
-                src_spk = out_emb_dir.parts[-2]
-            else:
-                src_spk = out_emb_dir.parts[-3]
-            src_ref_emb = src_spk_refs[src_spk]
-            desims.append(1 - distance.cosine(src_ref_emb, out_emb))
-            for spk_ref in spk_refs:
-                ref_emb = spk_refs[spk_ref]
-                spk_scores[target_spk]['labels'].append(int(spk_ref == target_spk))
-                sim_score = distance.cosine(ref_emb, out_emb)
-                spk_scores[target_spk]['scores'].append(sim_score)
-                if spk_ref == target_spk:
-                    sims.append(1 - sim_score)
-                    spk_scores[target_spk]['target_labels'].append(0)
-                    spk_scores[target_spk]['target_scores'].append(sim_score)
-    
-
+        if args.set == 'librispeech':
+            if args.anchor_spk == 'none' or out_emb_dir.parts[-2] == args.anchor_spk:
+                target_spk = out_emb_dir.stem.split('_')[-1]
+                if target_spk not in target_spks:
+                    target_spks.append(target_spk)
+                out_emb = np.load(out_emb_dir)
+                if args.anchor_spk == 'none':
+                    src_spk = out_emb_dir.parts[-2]
+                else:
+                    src_spk = out_emb_dir.parts[-3]
+                src_ref_emb = src_spk_refs[src_spk]
+                desims.append(1 - distance.cosine(src_ref_emb, out_emb))
+                for spk_ref in spk_refs:
+                    ref_emb = spk_refs[spk_ref]
+                    spk_scores[target_spk]['labels'].append(int(spk_ref == target_spk))
+                    sim_score = distance.cosine(ref_emb, out_emb)
+                    spk_scores[target_spk]['scores'].append(sim_score)
+                    if spk_ref == target_spk:
+                        sims.append(1 - sim_score)
+                        spk_scores[target_spk]['target_labels'].append(0)
+                        spk_scores[target_spk]['target_scores'].append(sim_score)
+        elif args.set == 'cv':
+            if args.anchor_spk == 'none' or out_emb_dir.parts[-2] == args.anchor_spk:
+                if args.anchor_spk == 'none':
+                    target_spk = out_emb_dir.parts[-2]
+                else:
+                    target_spk = out_emb_dir.parts[-3]
+                if target_spk not in target_spks:
+                    target_spks.append(target_spk)
+                out_emb = np.load(out_emb_dir)
+                for spk_ref in spk_refs:
+                    ref_emb = spk_refs[spk_ref]
+                    spk_scores[target_spk]['labels'].append(int(spk_ref == target_spk))
+                    sim_score = distance.cosine(ref_emb, out_emb)
+                    spk_scores[target_spk]['scores'].append(sim_score)
+                    if spk_ref == target_spk:
+                        sims.append(1 - sim_score)
+                        spk_scores[target_spk]['target_labels'].append(0)
+                        spk_scores[target_spk]['target_scores'].append(sim_score)
 
     eers = []
     for ref_spk in target_spks:
@@ -106,7 +129,8 @@ def main(args):
         target_eers.append(eer(spk_scores[ref_spk]['target_labels'], np.array(spk_scores[ref_spk]['target_scores'])))
 
     print("Speaker similarity: ", np.array(sims).mean())
-    print("Source speaker similarity: ", np.array(desims).mean())
+    if len(desims) > 0:
+        print("Source speaker similarity: ", np.array(desims).mean())
     print("EER: ", np.array(eers).mean())
     print("EER STD: ", np.std(np.array(eers)))
     print("Target EER: ", np.array(target_eers).mean())
