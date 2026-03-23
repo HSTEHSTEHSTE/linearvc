@@ -15,17 +15,18 @@ import torch.nn as nn
 import torchaudio
 import torchaudio.functional as F
 
-from .utils import fast_cosine_dist
+from .utils import fast_cosine_dist, stack_frames, unwrap_frames
 
 n_frames_max = 8192  # maximum no. of matched frames in linear regression
 k_top = 1
 
 
 class LinearVC(nn.Module):
-    def __init__(self, wavlm, hifigan, device="cuda"):
+    def __init__(self, wavlm, hifigan, num_frames=1, device="cuda"):
         super().__init__()
         self.wavlm = wavlm.eval()
         self.hifigan = hifigan.eval()
+        self.num_frames = num_frames
         self.device = device
         self.sr = 16000
 
@@ -85,6 +86,9 @@ class LinearVC(nn.Module):
             )
             best = dists.topk(k=k_top, largest=False, dim=-1)
             linear_target = target_features[best.indices].mean(dim=1)
+            
+            source_features = stack_frames(source_features, self.num_frames)
+            linear_target = stack_frames(linear_target, self.num_frames)
         else:
             # Audio with the same name: parallel utterance pairs
             source_target_wav_pairs = []
@@ -116,6 +120,9 @@ class LinearVC(nn.Module):
             source_features = torch.vstack(combined_source_feats)
             linear_target = torch.vstack(combined_linear_target)
 
+            source_features = stack_frames(source_features, self.num_frames)
+            linear_target = stack_frames(linear_target, self.num_frames)
+
         # Projection matrix
         if lasso is None:
             from numpy import linalg
@@ -139,7 +146,9 @@ class LinearVC(nn.Module):
     @torch.inference_mode()
     def project_and_vocode(self, input_features, W):
         """Return the waveform samples."""
+        input_features = stack_frames(input_features, self.num_frames)
         source_to_target_feats = input_features[None] @ W
+        source_to_target_feats = unwrap_frames(source_to_target_feats.squeeze(0), self.num_frames).unsqueeze(0)
         wav_hat = self.hifigan(source_to_target_feats).squeeze(0)
         return wav_hat.cpu().squeeze().cpu()
 
