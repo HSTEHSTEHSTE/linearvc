@@ -26,12 +26,7 @@ def check_argv():
         "--num_utt_per_speaker",
         type=int,
         default=20,
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-    )    
+    )  
     parser.add_argument(
         "--set",
         type=str,
