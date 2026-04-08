@@ -17,10 +17,6 @@ def check_argv():
         help="output Resemblyzer embedding directory",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-    )
-    parser.add_argument(
         "--anchor_spk",
         type=str,
         default='none',

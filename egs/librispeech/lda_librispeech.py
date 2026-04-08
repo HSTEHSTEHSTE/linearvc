@@ -34,7 +34,6 @@ def check_argv():
 
 def main(args):
     wavlm = torch.hub.load("bshall/knn-vc", "wavlm_large", trust_repo=True, device=device)
-    hifigan, _ = torch.hub.load("bshall/knn-vc", "hifigan_wavlm", trust_repo=True, device=device, prematched=True)
 
     subsets = args.subsets
     rank = args.rank
