@@ -49,10 +49,64 @@ def check_argv():
         default=0,
         help="If >0, also add ALL contiguous segments from each target-speaker audio whose length is <= this many frames."
     )
-    parser.add_argument("--w_mean", type=float, default=1.0, help="Weight for mean/pooled distance")
+    parser.add_argument(
+        "--min-segment-length",
+        type=int,
+        default=1,
+        help="Minimum segment length in feature frames. Segments shorter than this are skipped. (Does not apply to aligned segments)"
+    )
+    parser.add_argument(
+        "--source-segment-length",
+        type=int,
+        default=0,
+        help="If >0, ignore forced alignment for the source and instead use sliding windows of this many feature frames."
+    )
+    parser.add_argument(
+        "--source-stride",
+        type=int,
+        default=0,
+        help="Stride (in feature frames) between consecutive source windows when --source-segment-length > 0."
+    )
+    parser.add_argument(
+        "--target_use_alignment",
+        action="store_true",
+        help="If set, build target bag from forced-aligned segments (and optional silence). If not set, do not use alignments for target bag."
+    )
+    parser.add_argument("--w_mean", type=float, default=5.0, help="Weight for mean/pooled distance")
     parser.add_argument("--w_first", type=float, default=1.0, help="Weight for first-frame distance")
     parser.add_argument("--w_last", type=float, default=1.0, help="Weight for last-frame distance")
     return parser.parse_args()
+
+def overlap_add_average(chunks, starts, total_len, device=None):
+    """
+    chunks: list of [Li, D] tensors (matched segments)
+    starts: list of start indices (in output frame coordinates) for each chunk
+    total_len: total number of frames in final sequence (in source frame coordinates)
+    Returns: [total_len, D] tensor where overlapping frames are averaged.
+    """
+    assert len(chunks) == len(starts)
+    if len(chunks) == 0:
+        return None
+
+    D = chunks[0].shape[1]
+    dev = device if device is not None else chunks[0].device
+
+    acc = torch.zeros((total_len, D), device=dev)
+    cnt = torch.zeros((total_len, 1), device=dev)
+
+    for seg, s in zip(chunks, starts):
+        if seg is None or seg.numel() == 0:
+            continue
+        L = seg.shape[0]
+        e = min(total_len, s + L)
+        L_eff = e - s
+        if L_eff <= 0:
+            continue
+        acc[s:e] += seg[:L_eff]
+        cnt[s:e] += 1.0
+
+    # avoid divide-by-zero; any uncovered frames become 0
+    return acc / torch.clamp(cnt, min=1.0)
 
 def length_scaled_pool(X, alpha):
     n = X.shape[0]
@@ -118,11 +172,12 @@ def main(args):
     alpha = args.alpha
     lam = args.lam
     k = args.segment_splits
+    min_len = int(args.min_segment_length or 1)
 
-    # src_wav_path = Path('/home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/test-clean/61/70968/61-70968-0000.flac')
-    # tgt_speaker_path = Path('/home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/test-clean/121')
-    src_wav_path = Path('/home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/test-clean/121/121726/121-121726-0000.flac')
-    tgt_speaker_path = Path('/home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/test-clean/61')
+    src_wav_path = Path('/home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/test-clean/61/70968/61-70968-0000.flac')
+    tgt_speaker_path = Path('/home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/test-clean/121')
+    # src_wav_path = Path('/home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/test-clean/121/121726/121-121726-0000.flac')
+    # tgt_speaker_path = Path('/home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/test-clean/61')
     tgt_speaker_wavs = list(tgt_speaker_path.rglob("*.flac"))
 
     with open('/home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/alignments/alignments.json', 'r') as file:
@@ -133,44 +188,45 @@ def main(args):
     silence_lens = []
     voiced_lens = []
     for tgt_speaker_wav in tqdm(tgt_speaker_wavs):
-        alignment = alignments[tgt_speaker_wav.stem]
         wav, sr = torchaudio.load(tgt_speaker_wav)
         with torch.no_grad():
             x, _ = wavlm.extract_features(wav.to(device), output_layer=6)
         x = x.squeeze(0)  # [T, D]
 
-        # 1) existing: add alignment-derived chunks (voiced + optional silence)
-        current_frame = 0
-        for phoneme_info in alignment:
-            start = math.floor(phoneme_info['start'] * 50)
-            end = math.ceil(phoneme_info['end'] * 50)
+        if args.target_use_alignment:
+            # add alignment-derived chunks (voiced + optional silence)
+            current_frame = 0
+            alignment = alignments[tgt_speaker_wav.stem]
+            for phoneme_info in alignment:
+                start = math.floor(phoneme_info['start'] * 50)
+                end = math.ceil(phoneme_info['end'] * 50)
 
-            if start > current_frame:
-                silence_frames = x[current_frame:start]
-                for chunk in split_into_equal_portions(silence_frames, k):
-                    silence_lens.append(int(chunk.shape[0]))
-                    if args.bag_silence:
+                if start > current_frame:
+                    silence_frames = x[current_frame:start]
+                    for chunk in split_into_equal_portions(silence_frames, k):
+                        silence_lens.append(int(chunk.shape[0]))
                         bag.append(chunk)
 
-            if start >= end:
-                continue
+                if start >= end:
+                    continue
 
-            frames = x[start:end]
-            current_frame = end
-            for chunk in split_into_equal_portions(frames, k):
-                voiced_lens.append(int(chunk.shape[0]))
-                bag.append(chunk)
+                frames = x[start:end]
+                current_frame = end
+                for chunk in split_into_equal_portions(frames, k):
+                    voiced_lens.append(int(chunk.shape[0]))
+                    bag.append(chunk)
 
-        # trailing silence after last phone (optional; your code currently doesn't add it)
-        if args.bag_silence and current_frame < x.shape[0]:
-            for chunk in split_into_equal_portions(x[current_frame:], k):
-                silence_lens.append(int(chunk.shape[0]))
-                bag.append(chunk)
+            # trailing silence after last phone (optional; your code currently doesn't add it)
+            if args.bag_silence and current_frame < x.shape[0]:
+                for chunk in split_into_equal_portions(x[current_frame:], k):
+                    silence_lens.append(int(chunk.shape[0]))
+                    bag.append(chunk)
 
-        # 2) NEW: also add all subsegments up to max segment length (feature frames)
+        # add all subsegments up to max segment length (feature frames)
         if args.max_segment_length and args.max_segment_length > 0:
             for seg in all_subsegments_leq(x, args.max_segment_length):
-                bag.append(seg)
+                if chunk.shape[0] >= min_len:
+                    bag.append(seg)
     
     bag_means = None
     bag_first = None
@@ -230,43 +286,120 @@ def main(args):
     with torch.no_grad():
         x, _ = wavlm.extract_features(wav.to(device), output_layer=6)
     x = x.squeeze(0)
+    src_alignment = alignments[src_wav_path.stem]
 
-    alignment = alignments[src_wav_path.stem]
-    # ---- bin source voiced chunk length -> matched target chunk length counts ----
+    # ---- bin source chunk length -> matched target chunk length counts ----
     src_len_to_tgt_len_counts = defaultdict(Counter)
-    new_seq = []
-    current_frame = 0
 
-    num_segments = len(alignment)
-    for seg_idx, phoneme_info in enumerate(tqdm(alignment)):
-        is_first_seg = (seg_idx == 0)
-        is_last_seg = (seg_idx == num_segments - 1)
-        start = math.floor(phoneme_info['start'] * 50)
-        end = math.ceil(phoneme_info['end'] * 50)
+    seg_len = int(args.source_segment_length or 0)
+    stride = int(args.source_stride or 0)
 
-        if start > current_frame:
-            silence_frames = x[current_frame:start]
+    if seg_len <= 0:
+        # ============== FALLBACK: original alignment-based source segmentation ==============
+        new_seq_list = []
+        current_frame = 0
+        num_segments = len(src_alignment)
+
+        for seg_idx, phoneme_info in enumerate(tqdm(src_alignment)):
+            is_first_seg = (seg_idx == 0)
+            is_last_seg = (seg_idx == num_segments - 1)
+
+            start = math.floor(phoneme_info["start"] * 50)
+            end = math.ceil(phoneme_info["end"] * 50)
+
+            # optional silence region between phones
+            if start > current_frame:
+                silence_frames = x[current_frame:start]
+                if args.bag_silence:
+                    for chunk in split_into_equal_portions(silence_frames, k):
+                        matched = pick_from_bag(chunk, use_first=not is_first_seg, use_last=not is_last_seg)
+                        new_seq_list.append(matched)
+                else:
+                    new_seq_list.append(silence_frames)
+
+            if start >= end:
+                continue
+
+            frames = x[start:end]
+            for chunk in split_into_equal_portions(frames, k):
+                matched = pick_from_bag(chunk, use_first=not is_first_seg, use_last=not is_last_seg)
+
+                src_len = int(chunk.shape[0])
+                tgt_len = int(matched.shape[0]) if matched is not None else 0
+                src_len_to_tgt_len_counts[src_len][tgt_len] += 1
+
+                new_seq_list.append(matched)
+
+            current_frame = end
+
+        # trailing silence after last phone
+        if current_frame < x.shape[0]:
+            tail = x[current_frame:]
             if args.bag_silence:
-                for chunk in split_into_equal_portions(silence_frames, k):
-                    new_seq.append(pick_from_bag(chunk, use_first=not is_first_seg, use_last=not is_last_seg))
+                for chunk in split_into_equal_portions(tail, k):
+                    new_seq_list.append(pick_from_bag(chunk, use_first=True, use_last=False))
             else:
-                new_seq.append(silence_frames)
+                new_seq_list.append(tail)
 
-        if start >= end:
-            continue
+        new_seq = torch.cat(new_seq_list, dim=0)
 
-        frames = x[start:end]
-        for chunk in split_into_equal_portions(frames, k):
-            src_len = int(chunk.shape[0])
-            matched = pick_from_bag(chunk, use_first=not is_first_seg, use_last=not is_last_seg)
+    else:
+        # ============== Sliding-window source segmentation + overlap-add stitching ==============
+        if stride <= 0:
+            raise ValueError("Meow: set --source-stride > 0 when --source-segment-length > 0.")
+
+        T = x.shape[0]
+        if T == 0:
+            raise ValueError("Meow: source features have length 0 frames.")
+
+        if T <= seg_len:
+            starts = [0]
+        else:
+            starts = list(range(0, T - seg_len + 1, stride))
+            if len(starts) == 0:
+                starts = [0]
+            if starts[-1] + seg_len < T:
+                starts.append(T - seg_len)
+
+        matched_chunks = []
+        for i, s in enumerate(tqdm(starts)):
+            e = min(T, s + seg_len)
+            query = x[s:e]
+
+            is_first = (i == 0)
+            is_last = (i == len(starts) - 1)
+
+            matched = pick_from_bag(query, use_first=not is_first, use_last=not is_last)
+
+            src_len = int(query.shape[0])
             tgt_len = int(matched.shape[0]) if matched is not None else 0
-
             src_len_to_tgt_len_counts[src_len][tgt_len] += 1
-            new_seq.append(matched)
 
-        current_frame = end
+            matched_chunks.append(matched)
 
-    new_seq = torch.cat(new_seq, axis=0)
+        if len(matched_chunks) == 0:
+            raise ValueError("Meow: no matched chunks produced; check seg_len/stride.")
+
+        # place chunks based on matched lengths, preserving overlap=seg_len-stride
+        matched_starts = []
+        overlap = max(0, seg_len - stride)
+
+        prev_start = 0
+        prev_len = int(matched_chunks[0].shape[0]) if (matched_chunks[0] is not None and matched_chunks[0].numel() > 0) else 0
+        matched_starts.append(0)
+
+        for i in range(1, len(matched_chunks)):
+            prev_end = prev_start + prev_len
+            next_start = max(0, prev_end - overlap)
+
+            matched_starts.append(next_start)
+
+            prev_start = next_start
+            seg = matched_chunks[i]
+            prev_len = int(seg.shape[0]) if (seg is not None and seg.numel() > 0) else 0
+
+        total_len = prev_start + prev_len
+        new_seq = overlap_add_average(matched_chunks, matched_starts, total_len=total_len, device=device)
     with torch.no_grad():
         wav_hat = hifigan(new_seq.unsqueeze(0)).squeeze(0).detach().cpu()
     torchaudio.save('output.wav', wav_hat, 16000)
