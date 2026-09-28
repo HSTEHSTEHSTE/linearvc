@@ -1,0 +1,169 @@
+# English Emilia streaming training using the paper-scale ZipVoice model with
+# a fixed-duration speech prompt ablation.
+# Before launching, request access to amphion/Emilia-Dataset and run
+# `huggingface-cli login` (or export HF_TOKEN with an approved token).
+
+training:
+  project_name: LinearVC_CF-TTS
+  run_name: emilia_en_style3s_4ksec
+  # This is now the number of complete Emilia sweeps. Set it deliberately:
+  # 100000 would mean 100000 full passes over all selected Emilia shards.
+  epochs: 100000
+  num_workers: 16
+  max_frames_per_batch: 6500000
+  random_seed: 42
+  content_factorization:
+    type: content
+    content_factorization_file: /home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/librispeech_train-clean-100/rank_75/src_103/transforms.npy
+    # Default: use the globally learned 1024x75 UTXSS basis beside transforms.npy.
+    # Compatibility option: content_projection: pinv_anchor
+    content_projection: utxss
+    content_projection_file: null
+    content_projection_anchor: null
+    factorization_speaker: /home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/dev-clean/1272
+  # ZipVoice paper: drop the text condition 20% of the time for CFG training.
+  condition_drop_ratio: 0.2
+  noise_scale: 1.0
+  feature_scale: 0.1
+  normalize_input: true
+  sampling_steps: 16
+  clip_grad_norm: 1.0
+  use_grad_scaler: true
+  log_every: 100
+  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/emilia_en_style3s_4ksec
+  # Lightweight recovery checkpoints are frequent; full validation remains
+  # less frequent because it runs 100 Common Voice batches plus synthesis.
+  save_every_steps: 500
+  validate_every_steps: 2000
+  save_every_epochs: 1
+  num_ckpt_best_loss: 3
+  num_ckpt_latest_epochs: 3
+  num_ckpt_latest_steps: 3
+
+optim:
+  lr: 5.0e-5
+  weight_decay: 1.0e-6
+  scheduler_type: '0'
+  scheduler_args:
+    factor: 0.2
+    total_iters: 1000
+
+model:
+  tts:
+    zipvoice:
+      fm_decoder_downsampling_factor: [1, 2, 4, 2, 1]
+      fm_decoder_num_layers: [2, 2, 4, 4, 4]
+      fm_decoder_cnn_module_kernel: [31, 15, 7, 15, 31]
+      fm_decoder_feedforward_dim: 1536
+      fm_decoder_num_heads: 4
+      fm_decoder_dim: 512
+      text_encoder_num_layers: 4
+      text_encoder_feedforward_dim: 512
+      text_encoder_cnn_module_kernel: 9
+      text_encoder_num_heads: 4
+      text_encoder_dim: 192
+      query_head_dim: 32
+      value_head_dim: 12
+      pos_head_dim: 4
+      pos_dim: 48
+      time_embed_dim: 192
+      text_embed_dim: 192
+      text_feat_dim: 75
+      feat_dim: 75
+      vocab_size: 80
+      # Keep one randomly located 3-second WavLM prompt (150 frames) and
+      # synthesize every remaining valid feature frame.
+      style_prompt_frames: 150
+      mask_text: true
+      # The style-prompt branch above takes precedence over this ratio. Keep
+      # it at 1.0 to document that all non-prompt frames are generated.
+      mask_ratio_min: 1.0
+      mask_ratio_max: 1.0
+      use_accent: false
+      accent_vocab_size: 14
+      accent_dim: 100
+
+data:
+  text_tokenizer:
+    type: phone
+    pre_phonemized: false
+    tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/phones_espeak.json
+  accent:
+    use_accent: false
+    accent_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/spm/accents.json
+  train:
+    dataset: emilia
+    load_path: null
+    # One in-process background thread streams compressed shard members.
+    # Keep DataLoader workers at zero to avoid POSIX semaphore allocation.
+    streaming_background_prefetch_batches: 1
+    # The 80 GB A100 estimate: 32 full 30-second clips are the reference batch.
+    # Actual capacity is linearly scaled down by the longest audio in the batch.
+    streaming_reference_audio_seconds: 30
+    # Conservative fallback for direct launches. The Slurm launcher also caps
+    # its measured batch size at 24 to leave room for real-text variability.
+    streaming_reference_batch_size: 24
+    # Dynamic batches grow linearly as clips get shorter, bounded as a
+    # practical safeguard against non-audio memory overhead.
+    streaming_max_batch_size: 128
+    # Match the ZipVoice paper's 4k-second global flow-matching batch.
+    # The trainer sums actual wav_lengths, not padded duration or utterances.
+    streaming_gradient_accumulation_target_seconds: 4000
+    # The Slurm launcher probes up to this batch size before training and
+    # overrides streaming_reference_batch_size for that job with the result.
+    streaming_probe_max_batch_size: 64
+    streaming_probe_tokens_per_clip: 400
+    # Long transcripts are gradient-accumulated in microbatches. The square
+    # budget equals the probe workload: 24 clips * 400 phones squared.
+    streaming_token_square_budget: 3840000
+    streaming_max_tokens_per_utterance: 1600
+    # Emilia EN's largest currently listed shard is about 7 GiB. Retain at most
+    # 10 GiB of compressed shard samples before length sorting; the Slurm job
+    # requests 32 GiB of CPU RAM to leave headroom for decoding and Python.
+    streaming_shard_buffer_bytes: 10737418240
+    # The launcher sets this to node-local TMPDIR. A complete tar is staged
+    # before iteration, then deleted once the shard has been consumed.
+    streaming_local_shard_cache_dir: null
+    # A truncated remote tar is reopened from the last raw WebDataset record.
+    # These retries make transient Hugging Face timeouts non-fatal.
+    streaming_shard_max_retries: 8
+    streaming_shard_retry_backoff_seconds: 5.0
+    streaming_shard_retry_max_backoff_seconds: 60.0
+    # Zero exhausts the complete selected Emilia stream once per epoch.
+    # Set a positive value only when intentionally using synthetic epochs.
+    epoch_batch_limit: 0
+    shuffle_batches: false
+    shuffle_batches_between_epochs: false
+    emilia:
+      repo_id: amphion/Emilia-Dataset
+      revision: main
+      directory: Emilia
+      languages: [EN]
+      hf_token_env: HF_TOKEN
+      shuffle_seed: 42
+      # Skip clips too short to provide a full 3-second style prompt.
+      min_audio_seconds: 3.0
+      json_key: json
+      text_key: text
+      speaker_key: speaker_id
+  # Keep the existing local Common Voice validation set so validation does not
+  # re-stream Emilia on every checkpoint.
+  dev:
+    dataset: commonvoice
+    load_path: null
+    commonvoice_subsets:
+      - /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/clips/dev.tsv
+    epoch_batch_limit: 100
+    shuffle_batches: true
+    shuffle_batches_between_epochs: false
+    # This explicit target makes qualitative validation comparable across
+    # checkpoints. The associated prompt is a different deterministic
+    # same-speaker utterance selected by TTSDataset.
+    validation_audio_target_path: /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/commonvoice/en/clips/common_voice_en_39588868.mp3
+    # Qualitative inference does not use the target audio or its duration.
+    validation_audio_duration_seconds: 8.0
+    validation_audio_seed: 42
+  commonvoice_root_path: /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/commonvoice/en
+  sampling_rate: 16000
+  max_audio_len: 480000
+  sort_by_length: false

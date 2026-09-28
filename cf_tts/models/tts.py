@@ -12,6 +12,7 @@ from linearvc.cf_tts.utils.common import (
     make_pad_mask,
     pad_labels,
     prepare_avg_tokens_durations,
+    style_prompt_time_mask,
 )
 
 class ZipVoice(nn.Module):
@@ -42,6 +43,7 @@ class ZipVoice(nn.Module):
         pad_id: int = 0,
         mask_ratio_min: float = 1.0,
         mask_ratio_max: float = 1.0,
+        style_prompt_frames: int = 0,
         mask_text: bool = False,
         use_accent: bool = False,
         accent_vocab_size: int = 14,
@@ -129,6 +131,7 @@ class ZipVoice(nn.Module):
         self.solver = EulerSolver(self, func_name="forward_fm_decoder")
 
         self.mask_ratio = (mask_ratio_min, mask_ratio_max)
+        self.style_prompt_frames = style_prompt_frames
         self.mask_text = mask_text
 
     def forward_fm_decoder(
@@ -341,6 +344,8 @@ class ZipVoice(nn.Module):
         t: torch.Tensor,
         accents: List[int] = None,
         condition_drop_ratio: float = 0.0,
+        prompt_features: Optional[torch.Tensor] = None,
+        prompt_features_lens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass of the model for training.
         Args:
@@ -359,15 +364,44 @@ class ZipVoice(nn.Module):
             features_lens=features_lens,
         )
 
-        speech_condition_mask = condition_time_mask(
-            features_lens=features_lens,
-            mask_percent=self.mask_ratio,
-            max_len=features.size(1),
-        )
+        if prompt_features is not None:
+            if prompt_features_lens is None:
+                raise ValueError("prompt_features_lens is required with prompt_features")
+            if prompt_features.size(0) != features.size(0):
+                raise ValueError("prompt_features and features must have the same batch size")
+            prompt_features_lens = torch.clamp(
+                prompt_features_lens.to(features.device),
+                min=0,
+                max=features.size(1),
+            )
+            speech_condition_mask = make_pad_mask(prompt_features_lens, features.size(1))
+            prompt_features = prompt_features[:, : features.size(1)]
+            speech_condition = torch.nn.functional.pad(
+                prompt_features,
+                (0, 0, 0, features.size(1) - prompt_features.size(1)),
+            )
+            speech_condition = torch.where(
+                speech_condition_mask.unsqueeze(-1),
+                torch.zeros_like(speech_condition),
+                speech_condition,
+            )
+        elif self.style_prompt_frames > 0:
+            speech_condition_mask = style_prompt_time_mask(
+                features_lens=features_lens,
+                prompt_frames=self.style_prompt_frames,
+                max_len=features.size(1),
+            )
+        else:
+            speech_condition_mask = condition_time_mask(
+                features_lens=features_lens,
+                mask_percent=self.mask_ratio,
+                max_len=features.size(1),
+            )
 
         if self.mask_text:
             text_condition = torch.where(speech_condition_mask.unsqueeze(-1), text_condition, 0)
-        speech_condition = torch.where(speech_condition_mask.unsqueeze(-1), 0, features)
+        if prompt_features is None:
+            speech_condition = torch.where(speech_condition_mask.unsqueeze(-1), 0, features)
         if self.use_accent:
             accent_condition = self.accent_embed(torch.tensor(accents).to(speech_condition.device)).unsqueeze(1).expand(-1, text_condition.shape[1], -1)
         else:
@@ -393,6 +427,11 @@ class ZipVoice(nn.Module):
         )
 
         loss_mask = speech_condition_mask & (~padding_mask)
+        if not loss_mask.any():
+            # An utterance no longer than the style prompt has no target
+            # frames. Returning a differentiable zero prevents mean(empty)
+            # from turning a whole train or validation pass into NaN.
+            return vt.sum() * 0.0
         fm_loss = torch.mean((vt[loss_mask] - ut[loss_mask]) ** 2)
 
         return fm_loss

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import warnings
 import yaml
+import numpy as np
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +28,59 @@ else:
     from torch.cuda.amp import GradScaler
 
 Pathlike = Union[str, Path]
+
+
+def load_content_projection(
+    factorization_config: Dict[str, Any], device: torch.device
+) -> torch.Tensor:
+    """Load the WavLM-to-content projection used by CF-TTS.
+
+    ``utxss`` loads the factorization's globally learned UTXSS basis directly.
+    ``pinv_anchor`` retains the historical behavior of using the pseudoinverse
+    of one speaker transform (the first transform unless an anchor is given).
+    """
+    if factorization_config.get("type") != "content":
+        raise ValueError("Content projection is only defined for content factorization.")
+
+    factorization_path = factorization_config.get("content_factorization_file")
+    if factorization_path is None:
+        raise ValueError("content_factorization_file is required for content factorization.")
+    factorization_path = Path(factorization_path)
+    mode = factorization_config.get("content_projection", "utxss")
+
+    if mode == "utxss":
+        projection_path = factorization_config.get("content_projection_file")
+        projection_path = (
+            Path(projection_path)
+            if projection_path is not None
+            else factorization_path.with_name("UTXSS.npy")
+        )
+        if not projection_path.is_file():
+            raise FileNotFoundError(
+                f"UTXSS content projection not found: {projection_path}. "
+                "Set content_projection: pinv_anchor to use the legacy path."
+            )
+        projection = np.load(projection_path)
+    elif mode == "pinv_anchor":
+        transforms = np.load(factorization_path, allow_pickle=True).item()
+        anchor = factorization_config.get("content_projection_anchor")
+        if anchor is None:
+            anchor = next(iter(transforms))
+        if str(anchor) not in transforms:
+            raise KeyError(
+                f"Content projection anchor {anchor!r} is not in {factorization_path}."
+            )
+        projection = np.linalg.pinv(transforms[str(anchor)])
+    else:
+        raise ValueError(
+            f"Unknown content_projection {mode!r}; expected 'utxss' or 'pinv_anchor'."
+        )
+
+    if projection.ndim != 2:
+        raise ValueError(
+            f"Content projection must be rank-2, got shape {projection.shape}."
+        )
+    return torch.as_tensor(projection, dtype=torch.float32, device=device)
 
 
 class AttributeDict(dict):
@@ -346,6 +400,36 @@ def condition_time_mask(
         seq_range[None, :] < mask_ends[:, None]
     )
     return mask
+
+
+def style_prompt_time_mask(
+    features_lens: torch.Tensor,
+    prompt_frames: int,
+    max_len: int = 0,
+) -> torch.Tensor:
+    """Mask every valid frame except one randomly located style prompt.
+
+    The returned mask follows :func:`condition_time_mask` semantics: ``True``
+    denotes a frame to generate and ``False`` denotes a frame supplied as
+    speech conditioning.  Each utterance therefore contributes one contiguous
+    prompt crop from its own audio.
+    """
+    if prompt_frames <= 0:
+        raise ValueError("prompt_frames must be positive")
+
+    prompt_lens = torch.clamp(features_lens, max=prompt_frames)
+    start_max = features_lens - prompt_lens
+    prompt_starts = (
+        torch.rand_like(start_max, dtype=torch.float32) * (start_max + 1)
+    ).to(torch.int64)
+    prompt_ends = prompt_starts + prompt_lens
+
+    max_len = max(max_len, features_lens.max())
+    seq_range = torch.arange(0, max_len, device=features_lens.device)
+    is_prompt = (seq_range[None, :] >= prompt_starts[:, None]) & (
+        seq_range[None, :] < prompt_ends[:, None]
+    )
+    return ~is_prompt
 
 
 def condition_time_mask_suffix(
@@ -720,5 +804,3 @@ def match_knn(input_features, transform, k=4):
     input_features = torch.mean(input_features, dim=1) # [b * t, d]
     input_features = input_features.view(batch_size, -1, input_features.shape[-1])
     return input_features
-
-

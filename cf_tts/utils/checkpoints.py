@@ -76,21 +76,27 @@ def manage_checkpoints(ckpt_dir, keep_loss=5, keep_epoch=5, keep_step=5):
     }
 
 
-def save_checkpoint(model, optimizer, step, path, outdir, cfg):
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "step": step,
-        },
-        path,
-    )
+def save_checkpoint(model, optimizer, step, path, outdir, cfg, data_cursor=None):
+    """Atomically write a checkpoint, including an optional dataset cursor."""
+    checkpoint = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "step": step,
+        "data_cursor": data_cursor,
+    }
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        torch.save(checkpoint, temporary_path)
+        temporary_path.replace(path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
     ckpt_logs = manage_checkpoints(outdir, keep_loss=cfg['training']['num_ckpt_best_loss'], keep_epoch=cfg['training']['num_ckpt_latest_epochs'], keep_step=cfg['training']['num_ckpt_latest_steps'])
 
 
-def load_checkpoint(model, path, device, optimizer=None):
+def load_checkpoint(model, path, device, optimizer=None, return_checkpoint=False):
     ckpt = torch.load(path, map_location=device)
     model.load_state_dict(ckpt["model"])
     if optimizer is not None:
         optimizer.load_state_dict(ckpt["optimizer"])
-    return ckpt["step"]
+    return ckpt if return_checkpoint else ckpt["step"]

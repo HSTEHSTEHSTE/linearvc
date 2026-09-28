@@ -15,7 +15,7 @@ from pyannote.audio import Pipeline
 from linearvc import linearvc
 from linearvc.cf_tts.models.tts import ZipVoice
 
-from linearvc.cf_tts.utils.common import normalize_input, invert_normalized_input, load_config, get_speaker_feats
+from linearvc.cf_tts.utils.common import normalize_input, invert_normalized_input, load_config, get_speaker_feats, load_content_projection
 from linearvc.cf_tts.utils.checkpoints import load_checkpoint
 
 
@@ -157,8 +157,7 @@ def main():
     resamplers = {}
     if cfg['training']['content_factorization']['type'] == 'content':
         if cfg["training"]['content_factorization']["content_factorization_file"] is not None:
-            transforms = np.load(cfg["training"]['content_factorization']["content_factorization_file"], allow_pickle=True).item()
-            transform = torch.tensor(np.linalg.pinv(transforms[list(transforms.keys())[0]])).to(device)
+            transform = load_content_projection(cfg['training']['content_factorization'], device)
         else:
             transform = None
     elif cfg['training']['content_factorization']['type'] == 'speaker':
