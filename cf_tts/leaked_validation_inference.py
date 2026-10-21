@@ -17,6 +17,7 @@ from linearvc.cf_tts.models.tts import ZipVoice
 from linearvc.cf_tts.train import build_fixed_validation_audio_batch, prepare_validation_features
 from linearvc.cf_tts.utils.checkpoints import load_checkpoint
 from linearvc.cf_tts.utils.common import invert_normalized_input, load_config, load_content_projection
+from linearvc.cf_tts.utils.artifacts import configure_artifact_environment
 
 
 def main():
@@ -29,6 +30,8 @@ def main():
         help='Override the configured ODE steps; useful for a fast diagnostic smoke test.',
     )
     args = parser.parse_args()
+
+    configure_artifact_environment()
 
     config_path = Path(args.config)
     checkpoint_path = Path(args.checkpoint)

@@ -2,6 +2,9 @@ import numpy as np
 import torch, torchaudio
 from linearvc import linearvc
 from pathlib import Path
+from linearvc.cf_tts.utils.artifacts import artifact_root, configure_artifact_environment
+
+configure_artifact_environment()
 
 src_spk = Path('/home/hltcoe/xli/ARTS/corpora/TIMIT/TIMIT/TEST/DR1/FAKS0')
 # tgt_spk = Path('/home/hltcoe/xli/ARTS/corpora/TIMIT/TIMIT/TEST/DR2/MABW0')
@@ -13,7 +16,8 @@ convert_wav = 'SA1'
 # input_wav = src_spk / (convert_wav + '.WAV')
 input_wav = Path('/home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech/dev-clean/84/121123/84-121123-0001.flac')
 content_path = Path('/home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/TIMIT_TRAIN_vc/spk_0_r100')
-out_path = Path('/home/hltcoe/xli/ARTS/linearvc/exp/vc/TIMIT')
+out_path = artifact_root() / 'outputs' / 'vc' / 'TIMIT'
+out_path.mkdir(parents=True, exist_ok=True)
 
 vc_type = 'linear' # linear, content
 

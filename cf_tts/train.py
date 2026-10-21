@@ -1,45 +1,200 @@
-import argparse, math, shutil
+import argparse, math, os, shutil, signal
+from datetime import timedelta
+from contextlib import nullcontext
 from pathlib import Path
 import wandb
 
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.autograd import detect_anomaly
 
 import time
 from linearvc import linearvc
-from linearvc.cf_tts.dataset import BackgroundPrefetchDataset, EmiliaLengthSortedBatchDataset, EmiliaStreamingDataset, FrameBatchSampler, TTSDataset, TTS_Collate
+from linearvc.cf_tts.dataset import BackgroundPrefetchDataset, DistributedBatchSampler, EmiliaLengthSortedBatchDataset, EmiliaStreamingDataset, FrameBatchSampler, TTSDataset, TTS_Collate
 from linearvc.cf_tts.models.tts import ZipVoice
 from linearvc.cf_tts.utils.common import create_grad_scaler, invert_normalized_input, normalize_input, load_config, format_time, get_speaker_feats, load_content_projection, match_knn
 from linearvc.cf_tts.utils.checkpoints import load_checkpoint, manage_checkpoints, save_checkpoint
 from linearvc.cf_tts.utils.optim import get_scheduler
+from linearvc.cf_tts.utils.artifacts import configure_artifact_environment
 
 # -------------------------
 # helpers
 # -------------------------
 
+class DistributedState:
+    """Small torchrun/Slurm environment adapter used by the trainer."""
+
+    def __init__(self, rank, local_rank, world_size, device, initialized):
+        self.rank = rank
+        self.local_rank = local_rank
+        self.world_size = world_size
+        self.device = device
+        self.initialized = initialized
+
+    @property
+    def enabled(self):
+        return self.initialized and self.world_size > 1
+
+    @property
+    def is_main(self):
+        return self.rank == 0
+
+
+class PreemptionRequest:
+    """Record Slurm's pre-time-limit signal until the next safe checkpoint."""
+
+    def __init__(self):
+        self.requested = False
+
+    def handle(self, signum, _frame):
+        if signum == signal.SIGUSR1:
+            self.requested = True
+
+
+def setup_distributed() -> DistributedState:
+    """Initialize one process per GPU when launched by torchrun.
+
+    A plain ``python -m linearvc.cf_tts.train`` invocation intentionally keeps
+    the historical single-process behavior, including CPU fallback.
+    """
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if world_size < 1 or not 0 <= rank < world_size:
+        raise ValueError(f"Invalid distributed environment: RANK={rank}, WORLD_SIZE={world_size}")
+
+    if world_size == 1:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return DistributedState(rank, local_rank, world_size, device, initialized=False)
+
+    if torch.cuda.is_available():
+        if local_rank >= torch.cuda.device_count():
+            raise RuntimeError(
+                f"LOCAL_RANK={local_rank} exceeds {torch.cuda.device_count()} visible CUDA devices. "
+                "Launch one torchrun process per allocated GPU."
+            )
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+        backend = "nccl"
+    else:
+        # This path is useful for CPU-only distributed smoke tests. Production
+        # Slurm launches use NCCL on the rank-local CUDA device above.
+        device = torch.device("cpu")
+        backend = "gloo"
+    # Emilia stages complete tar shards before yielding a batch.  One rank can
+    # therefore legitimately spend longer than PyTorch's 10-minute default in
+    # a download/retry while peers are waiting at the next synchronized batch.
+    # Keep the timeout finite for real NCCL faults, but make it comfortably
+    # larger than a large-shard transfer and the configured retry backoff.
+    try:
+        timeout_seconds = int(os.environ.get("CF_TTS_DISTRIBUTED_TIMEOUT_SECONDS", "1800"))
+    except ValueError as exc:
+        raise ValueError("CF_TTS_DISTRIBUTED_TIMEOUT_SECONDS must be a positive integer.") from exc
+    if timeout_seconds < 1:
+        raise ValueError("CF_TTS_DISTRIBUTED_TIMEOUT_SECONDS must be a positive integer.")
+    init_kwargs = {
+        "backend": backend,
+        "init_method": "env://",
+        "rank": rank,
+        "world_size": world_size,
+        "timeout": timedelta(seconds=timeout_seconds),
+    }
+    # Bind NCCL's process group to the rank-local CUDA device. Without this,
+    # PyTorch has to guess the device used by a later barrier and warns that
+    # the resulting mapping can hang.
+    if backend == "nccl":
+        init_kwargs["device_id"] = device
+    dist.init_process_group(**init_kwargs)
+    return DistributedState(rank, local_rank, world_size, device, initialized=True)
+
+
+def distributed_barrier(state: DistributedState):
+    if state.enabled:
+        if state.device.type == "cuda":
+            dist.barrier(device_ids=[state.local_rank])
+        else:
+            dist.barrier()
+
+
+def distributed_any(value: bool, state: DistributedState) -> bool:
+    """Return whether any rank supplied true, while keeping control flow aligned."""
+    if not state.enabled:
+        return value
+    flag = torch.tensor(int(value), device=state.device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+    return bool(flag.item())
+
+
+def distributed_all(value: bool, state: DistributedState) -> bool:
+    """Return whether every rank supplied true, while keeping control flow aligned."""
+    if not state.enabled:
+        return value
+    flag = torch.tensor(int(value), device=state.device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+    return bool(flag.item())
+
+
+def distributed_sum(value: float, state: DistributedState) -> float:
+    """Return a scalar summed over all ranks."""
+    if not state.enabled:
+        return value
+    total = torch.tensor(float(value), dtype=torch.float64, device=state.device)
+    dist.all_reduce(total, op=dist.ReduceOp.SUM)
+    return total.item()
+
+
+def next_synchronized(iterator, state: DistributedState):
+    """Advance all ranks together and discard a partial final distributed batch."""
+    try:
+        batch = next(iterator)
+    except StopIteration:
+        batch = None
+    if not distributed_all(batch is not None, state):
+        return None
+    return batch
+
+
+def gather_stream_cursors(cursor, state: DistributedState):
+    """Make a rank-indexed cursor checkpoint that can be resumed safely."""
+    if not state.enabled:
+        return cursor
+    cursors = [None] * state.world_size
+    dist.all_gather_object(cursors, cursor)
+    if not state.is_main:
+        return None
+    return {"world_size": state.world_size, "cursors": cursors}
+
 def split_text_microbatches(tokens, token_square_budget, max_tokens_per_utterance):
-    """Pack ordered examples into text-memory-safe GPU microbatches."""
+    """Pack ordered examples into text-memory-safe GPU microbatches.
+
+    ZipVoice pads every token sequence in a microbatch to the longest sequence.
+    Its text-encoder memory therefore scales with ``batch_size * max_tokens**2``
+    rather than the sum of independently squared sequence lengths.
+    """
     if token_square_budget < 1 or max_tokens_per_utterance < 1:
         raise ValueError("Text microbatch limits must be positive.")
 
     microbatches = []
     skipped = []
     current = []
-    current_cost = 0
+    current_max_tokens = 0
     for index, token_ids in enumerate(tokens):
         token_count = len(token_ids)
         token_cost = token_count * token_count
         if token_count > max_tokens_per_utterance or token_cost > token_square_budget:
             skipped.append((index, token_count))
             continue
-        if current and current_cost + token_cost > token_square_budget:
+        prospective_max_tokens = max(current_max_tokens, token_count)
+        prospective_cost = (len(current) + 1) * prospective_max_tokens * prospective_max_tokens
+        if current and prospective_cost > token_square_budget:
             microbatches.append(current)
             current = []
-            current_cost = 0
+            current_max_tokens = 0
         current.append(index)
-        current_cost += token_cost
+        current_max_tokens = max(current_max_tokens, token_count)
     if current:
         microbatches.append(current)
     return microbatches, skipped
@@ -406,7 +561,7 @@ def validation_pass(dev_loader, fixed_audio_batch, linearvc_model, transform, cf
 # main
 # -------------------------
 
-def main():
+def _run_training():
     def parse_bool(value):
         if isinstance(value, bool):
             return value
@@ -422,17 +577,20 @@ def main():
     parser.add_argument("--ignore_current_step", type=parse_bool, default=False)
     args = parser.parse_args()
 
+    configure_artifact_environment()
+    state = setup_distributed()
+    preemption_request = PreemptionRequest()
+    signal.signal(signal.SIGUSR1, preemption_request.handle)
     cfg = load_config(args.config)
-    print(cfg, flush=True)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    wandb.login()
-    wandb.init(
-        project=cfg['training']['project_name'],
-        name=cfg['training']['run_name'],
-        id=cfg['training']['run_name'],
-    )
+    if state.is_main:
+        print(cfg, flush=True)
+        if state.enabled:
+            print(
+                f"Distributed training: world_size={state.world_size}, "
+                f"rank={state.rank}, local_rank={state.local_rank}, device={state.device}",
+                flush=True,
+            )
+    device = state.device
 
     # -------------------------
     # dataset
@@ -440,13 +598,21 @@ def main():
 
     train_is_streaming = cfg['data']['train']['dataset'] == 'emilia'
     dev_is_streaming = cfg['data']['dev']['dataset'] == 'emilia'
+    if dev_is_streaming:
+        raise ValueError('Qualitative validation audio requires a finite validation dataset.')
 
     load_path = None
     if train_is_streaming:
         if cfg['data']['train']['load_path'] is not None:
             raise ValueError("Emilia streaming does not support data.train.load_path; set it to null.")
         train_set = EmiliaLengthSortedBatchDataset(
-            EmiliaStreamingDataset(config_file_path=args.config, split='train'),
+            EmiliaStreamingDataset(
+                config_file_path=args.config,
+                split='train',
+                rank=state.rank,
+                world_size=state.world_size,
+                verbose=state.is_main,
+            ),
             config_file_path=args.config,
             split='train',
         )
@@ -459,26 +625,56 @@ def main():
         import pickle
         load_path = Path(cfg['data']['train']['load_path'])
         if load_path.is_file():
-            print("Reading pre-processed data file", flush=True)
+            if state.is_main:
+                print("Reading pre-processed data file", flush=True)
             with open(load_path, 'rb') as file:
                 data_list = pickle.load(file)
-            train_set = TTSDataset(config_file_path=args.config, split='train', data=data_list)
+            train_set = TTSDataset(config_file_path=args.config, split='train', data=data_list, verbose=state.is_main)
         else:
-            print("Pre-processing data and saving to load_path", flush=True)
-            train_set = TTSDataset(config_file_path=args.config, split='train')
-            with open(load_path, 'wb') as file:
-                pickle.dump(train_set.data, file)
+            if state.is_main:
+                print("Pre-processing data and saving to load_path", flush=True)
+                train_set = TTSDataset(config_file_path=args.config, split='train', verbose=True)
+                with open(load_path, 'wb') as file:
+                    pickle.dump(train_set.data, file)
+            distributed_barrier(state)
+            if not state.is_main:
+                with open(load_path, 'rb') as file:
+                    train_set = TTSDataset(
+                        config_file_path=args.config,
+                        split='train',
+                        data=pickle.load(file),
+                        verbose=False,
+                    )
     else:
-        print("Pre-processing data", flush=True)
-        train_set = TTSDataset(config_file_path=args.config, split='train')
+        if state.is_main:
+            print("Pre-processing data", flush=True)
+        train_set = TTSDataset(config_file_path=args.config, split='train', verbose=state.is_main)
     if not train_is_streaming:
         train_sampler = FrameBatchSampler(train_set, args.config, split='train')
+        if state.enabled:
+            train_sampler = DistributedBatchSampler(
+                train_sampler,
+                num_replicas=state.world_size,
+                rank=state.rank,
+                drop_last=True,
+            )
+            if len(train_sampler) == 0:
+                raise RuntimeError(
+                    "The length-aware training sampler has fewer full batches than DDP ranks. "
+                    "Reduce WORLD_SIZE or increase the training data."
+                )
 
     if dev_is_streaming:
         if cfg['data']['dev']['load_path'] is not None:
             raise ValueError("Emilia streaming does not support data.dev.load_path; set it to null.")
         dev_set = EmiliaLengthSortedBatchDataset(
-            EmiliaStreamingDataset(config_file_path=args.config, split='dev'),
+            EmiliaStreamingDataset(
+                config_file_path=args.config,
+                split='dev',
+                rank=state.rank,
+                world_size=state.world_size,
+                verbose=state.is_main,
+            ),
             config_file_path=args.config,
             split='dev',
         )
@@ -491,17 +687,17 @@ def main():
         import pickle
         with open(cfg['data']['dev']['load_path'], 'rb') as file:
             data_list = pickle.load(file)['data']
-        dev_set = TTSDataset(config_file_path=args.config, split='dev', data=data_list)
+        dev_set = TTSDataset(config_file_path=args.config, split='dev', data=data_list, verbose=state.is_main)
     else:
-        dev_set = TTSDataset(config_file_path=args.config, split='dev')
+        dev_set = TTSDataset(config_file_path=args.config, split='dev', verbose=state.is_main)
     if not dev_is_streaming:
         dev_sampler = FrameBatchSampler(dev_set, args.config, split='dev')
     
 
     tts_collate = TTS_Collate(cfg)
-    if dev_is_streaming:
-        raise ValueError('Qualitative validation audio requires a finite validation dataset.')
-    fixed_audio_batch = build_fixed_validation_audio_batch(dev_set, tts_collate, cfg)
+    fixed_audio_batch = (
+        build_fixed_validation_audio_batch(dev_set, tts_collate, cfg) if state.is_main else None
+    )
     if train_is_streaming:
         train_loader = DataLoader(
             train_set,
@@ -510,7 +706,7 @@ def main():
             # Emilia prefetches in BackgroundPrefetchDataset; worker processes
             # would create POSIX semaphores on the Slurm node.
             num_workers=0,
-            pin_memory=True,
+            pin_memory=device.type == 'cuda',
         )
     else:
         train_loader = DataLoader(
@@ -518,17 +714,17 @@ def main():
             batch_sampler=train_sampler,
             collate_fn=tts_collate,
             num_workers=cfg['training']['num_workers'],
-            pin_memory=True,
+            pin_memory=device.type == 'cuda',
         )
-    if dev_is_streaming:
+    if dev_is_streaming and state.is_main:
         dev_loader = DataLoader(
             dev_set,
             batch_size=None,
             collate_fn=tts_collate,
             num_workers=0,
-            pin_memory=True,
+            pin_memory=device.type == 'cuda',
         )
-    else:
+    elif state.is_main:
         dev_loader = DataLoader(
             dev_set,
             batch_sampler=dev_sampler,
@@ -536,8 +732,10 @@ def main():
             # Validation is infrequent and must not depend on POSIX
             # semaphores, which can be exhausted on shared Slurm nodes.
             num_workers=0,
-            pin_memory=True,
+            pin_memory=device.type == 'cuda',
         )
+    else:
+        dev_loader = None
 
     # -------------------------
     # model
@@ -575,16 +773,34 @@ def main():
         current_step = checkpoint_state["step"]
         if epoch_batch_length is None:
             stream_resume_cursor = checkpoint_state.get("data_cursor")
+            # A warm start intentionally retains model/optimizer state while
+            # discarding an incompatible streaming cursor (for example after
+            # changing DDP world size).
+            if args.ignore_current_step:
+                stream_resume_cursor = None
+            if state.enabled and stream_resume_cursor is not None and not args.ignore_current_step:
+                if not isinstance(stream_resume_cursor, dict) or "cursors" not in stream_resume_cursor:
+                    raise ValueError(
+                        "This Emilia checkpoint was created for single-process training and cannot "
+                        "safely resume with a different DDP partition. Start a fresh distributed sweep."
+                    )
+                if int(stream_resume_cursor.get("world_size", -1)) != state.world_size:
+                    raise ValueError(
+                        "Emilia DDP resume requires the checkpoint's original WORLD_SIZE; "
+                        f"checkpoint={stream_resume_cursor.get('world_size')}, current={state.world_size}."
+                    )
+                stream_resume_cursor = stream_resume_cursor["cursors"][state.rank]
             current_epoch = int(stream_resume_cursor.get("epoch", 0)) if stream_resume_cursor else 0
             if stream_resume_cursor:
                 train_set.set_resume_cursor(stream_resume_cursor)
-                print(
-                    "Resuming Emilia stream at "
-                    f"epoch {current_epoch}, shard {stream_resume_cursor['shard_index']}, "
-                    f"batch {stream_resume_cursor['batch_index']}.",
-                    flush=True,
-                )
-            else:
+                if state.is_main:
+                    print(
+                        "Resuming Emilia stream at "
+                        f"epoch {current_epoch}, shard {stream_resume_cursor['shard_index']}, "
+                        f"batch {stream_resume_cursor['batch_index']}.",
+                        flush=True,
+                    )
+            elif state.is_main:
                 print(
                     "Checkpoint has no Emilia stream cursor; starting a fresh dataset sweep.",
                     flush=True,
@@ -603,26 +819,39 @@ def main():
 
     scheduler = get_scheduler(cfg['optim']['scheduler_type'], optimizer, -1, cfg['optim']['scheduler_args'])
     current_lr = optimizer.param_groups[0]['lr']
-    print(f"Current learning rate: {current_lr}")
+    if state.is_main:
+        print(f"Current learning rate: {current_lr}")
 
     scaler = create_grad_scaler()
 
-    wavlm = torch.hub.load(
-        "bshall/knn-vc", 
-        "wavlm_large", 
-        trust_repo=True, 
-        progress=True, 
-        device=device, 
-    )
-    hifigan, _ = torch.hub.load(
-        "bshall/knn-vc",
-        "hifigan_wavlm",
-        trust_repo=True,
-        prematched=True,
-        progress=True,
-        device=device,
-    )
-    linearvc_model = linearvc.LinearVC(wavlm, hifigan, device)
+    def load_linearvc_modules():
+        wavlm = torch.hub.load(
+            "bshall/knn-vc",
+            "wavlm_large",
+            trust_repo=True,
+            progress=state.is_main,
+            device=device,
+        )
+        hifigan, _ = torch.hub.load(
+            "bshall/knn-vc",
+            "hifigan_wavlm",
+            trust_repo=True,
+            prematched=True,
+            progress=state.is_main,
+            device=device,
+        )
+        return linearvc.LinearVC(wavlm, hifigan, device)
+
+    # Populate shared Torch Hub cache on rank zero before the other processes
+    # materialize their own GPU-local WavLM/HiFi-GAN modules.
+    if state.enabled and state.is_main:
+        linearvc_model = load_linearvc_modules()
+        distributed_barrier(state)
+    else:
+        if state.enabled:
+            distributed_barrier(state)
+        linearvc_model = load_linearvc_modules()
+    distributed_barrier(state)
 
     if cfg['training']['content_factorization']['type'] == 'content':
         if cfg['training']['content_factorization']['content_factorization_file'] is not None:
@@ -649,6 +878,18 @@ def main():
     elif cfg['training']['content_factorization']['type'] == 'fbank':
         from speechbrain.lobes.features import Fbank
         transform = Fbank(sample_rate=16000, n_mels=cfg['model']['tts']['zipvoice']['feat_dim'])
+    else:
+        raise ValueError(
+            f"Unsupported content factorization type: {cfg['training']['content_factorization']['type']}"
+        )
+
+    training_model = model
+    if state.enabled:
+        ddp_args = (
+            {'device_ids': [state.local_rank], 'output_device': state.local_rank}
+            if device.type == 'cuda' else {}
+        )
+        training_model = DistributedDataParallel(model, **ddp_args)
 
 
     # -------------------------
@@ -656,22 +897,35 @@ def main():
     # -------------------------
 
     outdir = Path(cfg["training"]["out_dir"])
-    if not (outdir / 'cfg' / Path(args.config).name).is_file():
+    if state.is_main and not (outdir / 'cfg' / Path(args.config).name).is_file():
         outdir.mkdir(parents=True, exist_ok=True)
         (outdir / 'cfg').mkdir(parents=True, exist_ok=True)
         shutil.copy2(args.config, outdir / 'cfg')
+    distributed_barrier(state)
+
+    if state.is_main:
+        wandb.login()
+        wandb.init(
+            project=cfg['training']['project_name'],
+            name=cfg['training']['run_name'],
+            id=cfg['training']['run_name'],
+        )
 
     step = current_epoch * epoch_batch_length if epoch_batch_length is not None else max(current_step, 0)
-    model.train()
+    training_model.train()
     start_time = time.time()
     last_validation_step = None
+    last_data_cursor = None
 
     for epoch in range(cfg["training"]["epochs"]):
         losses = []
         if epoch < current_epoch:
             continue
 
-        print(f"\nEpoch {epoch}", flush=True)
+        if state.enabled and hasattr(train_sampler, 'set_epoch'):
+            train_sampler.set_epoch(epoch)
+        if state.is_main:
+            print(f"\nEpoch {epoch}", flush=True)
 
         physical_batch_index = -1
         train_iterator = iter(train_loader)
@@ -685,19 +939,38 @@ def main():
             physical_batches = []
             physical_examples = 0
             physical_audio_seconds = 0.0
-            while not physical_batches or (
-                train_is_streaming
-                and not accumulation_target_reached(
-                    physical_examples, physical_audio_seconds, cfg
-                )
-            ):
-                try:
-                    next_batch = next(train_iterator)
-                except StopIteration:
+            while True:
+                if physical_batches:
+                    if not train_is_streaming:
+                        break
+                    if accumulation_target_seconds > 0.0:
+                        # The configured audio budget is global, matching the
+                        # ZipVoice protocol. Sum rank-local audio so adding
+                        # GPUs preserves a roughly 4k-second optimizer update
+                        # instead of multiplying it by WORLD_SIZE.
+                        target_reached = (
+                            distributed_sum(physical_audio_seconds, state)
+                            >= accumulation_target_seconds
+                        )
+                    else:
+                        local_target_reached = accumulation_target_reached(
+                            physical_examples, physical_audio_seconds, cfg
+                        )
+                        # All ranks take the same number of physical batches
+                        # per update. Otherwise one rank could call next()
+                        # while another has already entered DDP backward.
+                        target_reached = distributed_any(local_target_reached, state)
+                    if target_reached:
+                        break
+                if (
+                    cfg['data']['train']['epoch_batch_limit'] > 0
+                    and physical_batch_index + 1 >= cfg['data']['train']['epoch_batch_limit']
+                ):
+                    break
+                next_batch = next_synchronized(train_iterator, state)
+                if next_batch is None:
                     break
                 physical_batch_index += 1
-                if cfg['data']['train']['epoch_batch_limit'] > 0 and physical_batch_index >= cfg['data']['train']['epoch_batch_limit']:
-                    break
                 physical_batches.append(next_batch)
                 physical_examples += int(next_batch['wav'].shape[0])
                 physical_audio_seconds += (
@@ -714,30 +987,37 @@ def main():
             gradient_plan, skipped_texts = plan_gradient_microbatches(physical_batches, cfg)
             all_text_ids = [text for batch in physical_batches for text in batch['text']]
             all_wav_lengths = torch.cat([batch['wav_lengths'] for batch in physical_batches])
-            if skipped_texts:
+            if skipped_texts and state.is_main:
                 skipped_summary = ', '.join(
                     f"physical={physical_index}:index={index}:tokens={token_count}"
                     for physical_index, index, token_count in skipped_texts
                 )
                 print(f"Skipping Emilia utterances above the text safety limit: {skipped_summary}", flush=True)
-            if not gradient_plan:
-                print("Skipping Emilia batch: every transcript exceeded the text safety limit.", flush=True)
+            # DDP cannot run backward on only a subset of ranks. Discard this
+            # update globally if one rank has no text-safe microbatch.
+            if not distributed_all(bool(gradient_plan), state):
+                if state.is_main:
+                    print("Skipping distributed update: at least one rank had no safe text microbatch.", flush=True)
                 continue
 
             total_target_frames = sum(target_frame_count for _, _, target_frame_count in gradient_plan)
 
-            if accumulation_target_seconds > 0.0:
+            global_physical_audio_seconds = distributed_sum(physical_audio_seconds, state)
+            global_physical_examples = int(distributed_sum(physical_examples, state))
+            if accumulation_target_seconds > 0.0 and state.is_main:
                 print(
-                    f'Optimizer update audio: {physical_audio_seconds:.1f}s '
+                    f'Optimizer update audio: {global_physical_audio_seconds:.1f}s '
                     f'(target {accumulation_target_seconds:.1f}s, '
-                    f'{physical_examples} utterances).',
+                    f'{global_physical_examples} utterances across {state.world_size} rank(s)).',
                     flush=True,
                 )
 
-            torch.manual_seed(step)
+            # Rank zero keeps the old seed sequence; other ranks receive
+            # independent noise and condition-drop draws for the same update.
+            torch.manual_seed(step + state.rank)
             optimizer.zero_grad()
             batch_loss = 0.0
-            for physical_batch, indices, target_frame_count in gradient_plan:
+            for microbatch_index, (physical_batch, indices, target_frame_count) in enumerate(gradient_plan):
                 wavs = physical_batch['wav']
                 wav_lengths = physical_batch['wav_lengths']
                 text_ids = physical_batch['text']
@@ -747,26 +1027,36 @@ def main():
                 micro_text_ids = [text_ids[index] for index in indices]
                 micro_accents = [accents[index] for index in indices] if accents else []
                 loss_weight = target_frame_count / total_target_frames
-                micro_loss = backward_train_microbatch(
-                    model,
-                    linearvc_model,
-                    transform,
-                    cfg,
-                    micro_wavs,
-                    micro_wav_lengths,
-                    micro_text_ids,
-                    micro_accents,
-                    device,
-                    loss_weight,
-                    scaler,
+                # Microbatch counts can vary with transcript lengths. Hold
+                # local reductions until each rank's final backward call so
+                # all ranks perform exactly one matching DDP synchronization.
+                sync_context = (
+                    training_model.no_sync()
+                    if state.enabled and microbatch_index + 1 < len(gradient_plan)
+                    else nullcontext()
                 )
+                with sync_context:
+                    micro_loss = backward_train_microbatch(
+                        training_model,
+                        linearvc_model,
+                        transform,
+                        cfg,
+                        micro_wavs,
+                        micro_wav_lengths,
+                        micro_text_ids,
+                        micro_accents,
+                        device,
+                        loss_weight,
+                        scaler,
+                    )
                 batch_loss += micro_loss * loss_weight
 
             losses.append(batch_loss)
 
             if cfg['training']['use_grad_scaler']:
                 scaler.unscale_(optimizer)
-            if not (list(model.parameters())[0].grad.isnan().any()):
+            first_grad = next(model.parameters()).grad
+            if first_grad is not None and not first_grad.isnan().any():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['training']['clip_grad_norm'])
                 if cfg['training']['use_grad_scaler']:
                     scaler.step(optimizer)
@@ -775,7 +1065,7 @@ def main():
             if cfg['training']['use_grad_scaler']:
                 scaler.update()
 
-            if step % cfg['training']['log_every'] == 0:
+            if step % cfg['training']['log_every'] == 0 and state.is_main:
                 current_time = time.time()
                 print(
                     f"epoch {epoch} | batch {batch_index} | microbatches {len(gradient_plan)} | "
@@ -789,27 +1079,30 @@ def main():
                         "train_microbatches": len(gradient_plan),
                         "train_max_tokens": max(map(len, all_text_ids)),
                         "train_physical_batches": len(physical_batches),
-                        "train_effective_examples": int(all_wav_lengths.numel()),
-                        "train_audio_seconds": all_wav_lengths.sum().item() / cfg['data']['sampling_rate'],
+                        "train_effective_examples": global_physical_examples,
+                        "train_audio_seconds": global_physical_audio_seconds,
                     },
                     step = step
                 )
 
             step += 1
-            data_cursor = None
+            last_data_cursor = None
             if train_is_streaming:
-                data_cursor = physical_batches[-1].get("stream_cursor")
-                if data_cursor is None:
+                last_data_cursor = physical_batches[-1].get("stream_cursor")
+                if last_data_cursor is None:
                     raise RuntimeError("Emilia training batch is missing its resume cursor.")
-                data_cursor = {**data_cursor, "epoch": epoch}
+                last_data_cursor = {**last_data_cursor, "epoch": epoch, "rank": state.rank}
 
-            if step % cfg["training"]["save_every_steps"] == 0 and step > 0:
-                validate_every_steps = int(
-                    cfg["training"].get("validate_every_steps", cfg["training"]["save_every_steps"])
+            # Slurm gives the batch launcher five minutes' notice before the
+            # wall time. The launcher relays that signal to every torchrun
+            # process; save after this optimizer update so model, optimizer,
+            # and Emilia cursor advance together before a clean exit.
+            if distributed_any(preemption_request.requested, state):
+                checkpoint_cursor = (
+                    gather_stream_cursors(last_data_cursor, state) if train_is_streaming else None
                 )
-                if validate_every_steps < 1:
-                    raise ValueError("training.validate_every_steps must be positive")
-                if step % validate_every_steps != 0:
+                distributed_barrier(state)
+                if state.is_main:
                     save_checkpoint(
                         model,
                         optimizer,
@@ -817,9 +1110,92 @@ def main():
                         outdir / f"ckpt_step_{step}.pt",
                         outdir,
                         cfg,
-                        data_cursor=data_cursor,
+                        data_cursor=checkpoint_cursor,
                     )
+                    print(
+                        f"Received Slurm pre-time-limit signal; checkpointed step {step} and exiting.",
+                        flush=True,
+                    )
+                distributed_barrier(state)
+                return
+
+            if step % cfg["training"]["save_every_steps"] == 0 and step > 0:
+                validate_every_steps = int(
+                    cfg["training"].get("validate_every_steps", cfg["training"]["save_every_steps"])
+                )
+                if validate_every_steps < 1:
+                    raise ValueError("training.validate_every_steps must be positive")
+                checkpoint_cursor = (
+                    gather_stream_cursors(last_data_cursor, state) if train_is_streaming else None
+                )
+                # Keep all ranks paused while rank zero validates and writes.
+                # This prevents a new DDP forward from racing validation or a
+                # partially written checkpoint.
+                distributed_barrier(state)
+                if step % validate_every_steps != 0:
+                    if state.is_main:
+                        save_checkpoint(
+                            model,
+                            optimizer,
+                            step,
+                            outdir / f"ckpt_step_{step}.pt",
+                            outdir,
+                            cfg,
+                            data_cursor=checkpoint_cursor,
+                        )
+                    distributed_barrier(state)
                     continue
+                if state.is_main:
+                    validation_loss = validation_pass(
+                        dev_loader,
+                        fixed_audio_batch,
+                        linearvc_model,
+                        transform,
+                        cfg,
+                        model,
+                        device,
+                        step,
+                        epoch,
+                    )
+                    wandb.log({"validation_loss": validation_loss}, step=step)
+                    save_checkpoint(
+                        model,
+                        optimizer,
+                        step,
+                        outdir / f"ckpt_loss_{validation_loss:.2f}_step_{step}.pt",
+                        outdir,
+                        cfg,
+                        data_cursor=checkpoint_cursor,
+                    )
+                distributed_barrier(state)
+                training_model.train()
+                last_validation_step = step
+
+
+        current_time = time.time()
+        if not losses:
+            if state.is_main:
+                print(
+                    f"epoch {epoch} | Emilia cursor was already at the end of this sweep; advancing.",
+                    flush=True,
+                )
+            continue
+        if state.is_main:
+            print(
+                f"epoch {epoch} | time elapsed {format_time(start_time, current_time)} | "
+                f"avg loss {(sum(losses) / len(losses)):.4f}",
+                flush=True,
+            )
+        if (
+            epoch % cfg["training"]["save_every_epochs"] == 0
+            and step > 0
+            and step != last_validation_step
+        ):
+            checkpoint_cursor = (
+                gather_stream_cursors(last_data_cursor, state) if train_is_streaming else None
+            )
+            distributed_barrier(state)
+            if state.is_main:
                 validation_loss = validation_pass(
                     dev_loader,
                     fixed_audio_batch,
@@ -831,65 +1207,39 @@ def main():
                     step,
                     epoch,
                 )
-                wandb.log(
-                    data = {
-                        "validation_loss": validation_loss,
-                    },
-                    step = step
-                )
+                wandb.log({"validation_loss": validation_loss}, step=step)
                 save_checkpoint(
                     model,
                     optimizer,
                     step,
-                    outdir / f"ckpt_loss_{validation_loss:.2f}_step_{step}.pt",
+                    outdir / f"ckpt_loss_{validation_loss:.2f}_epoch_{epoch}.pt",
                     outdir,
                     cfg,
-                    data_cursor=data_cursor,
+                    data_cursor=checkpoint_cursor,
                 )
-                last_validation_step = step
-
-        
-        current_time = time.time()
-        if not losses:
-            print(
-                f"epoch {epoch} | Emilia cursor was already at the end of this sweep; advancing.",
-                flush=True,
-            )
-            continue
-        print(f"epoch {epoch} | time elapsed {format_time(start_time, current_time)} | avg loss {(sum(losses) / len(losses)):.4f}")
-        if (
-            epoch % cfg["training"]["save_every_epochs"] == 0
-            and step > 0
-            and step != last_validation_step
-        ):
-            validation_loss = validation_pass(
-                dev_loader,
-                fixed_audio_batch,
-                linearvc_model,
-                transform,
-                cfg,
-                model,
-                device,
-                step,
-                epoch,
-            )
-            wandb.log(
-                data = {
-                    "validation_loss": validation_loss,
-                },
-                step = step
-            )
-            save_checkpoint(
-                model,
-                optimizer,
-                step,
-                outdir / f"ckpt_loss_{validation_loss:.2f}_epoch_{epoch}.pt",
-                outdir,
-                cfg,
-                data_cursor=data_cursor,
-            )
+            distributed_barrier(state)
+            training_model.train()
 
         scheduler.step()
+
+    distributed_barrier(state)
+    if state.is_main:
+        wandb.finish()
+    if state.enabled and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def main():
+    """Run training and release rank-local resources on normal or error exit."""
+    try:
+        _run_training()
+    finally:
+        # The successful path synchronizes before this point. On an error do
+        # not enter a fresh barrier: another rank may already be unwinding.
+        if wandb.run is not None:
+            wandb.finish()
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

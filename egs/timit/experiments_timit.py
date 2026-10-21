@@ -14,6 +14,9 @@ import torch
 import torchaudio
 
 from linearvc.utils import fast_cosine_dist
+from linearvc.cf_tts.utils.artifacts import artifact_root, configure_artifact_environment
+
+configure_artifact_environment()
 
 device = "cuda"
 wavlm = torch.hub.load("bshall/knn-vc", "wavlm_large", trust_repo=True, device=device)
@@ -67,7 +70,7 @@ transforms = {
     f"{speaker}": VT[i, :, :] for i, speaker in enumerate(speakers)
 }
 
-out_path = Path('/home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/TIMIT_' + subset + '_vc/spk_0_r' + str(rank))
+out_path = artifact_root() / 'outputs' / 'content_factorization' / f'TIMIT_{subset}_vc' / f'spk_0_r{rank}'
 out_path.mkdir(parents=True, exist_ok=True)
 np.save(out_path / 'XS.npy', XS)
 np.save(out_path / 'U.npy', U)

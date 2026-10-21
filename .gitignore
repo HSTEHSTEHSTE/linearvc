@@ -3,6 +3,8 @@
 !.*
 !*.py
 !*.pyx
+!*.sh
+!*.sbatch
 !*.yml
 !*.yaml
 !*.md
@@ -14,3 +16,13 @@
 notebooks/.ipynb_checkpoints/*
 linearvc.egg-info
 exp
+.cache
+
+# ARTS grid scheduler artifacts: retained locally for execution, never versioned.
+slurm/
+*.sbatch
+*.slurm
+slurm-*.sh
+*.log
+outputs/
+scripts/submit_*.sh

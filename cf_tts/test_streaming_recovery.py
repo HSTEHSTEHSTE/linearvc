@@ -15,6 +15,24 @@ from linearvc.cf_tts.utils.common import load_content_projection
 
 
 class EmiliaStreamingRecoveryTest(unittest.TestCase):
+    def test_local_manifest_filters_and_limits_shards_without_hub_access(self):
+        dataset = object.__new__(EmiliaStreamingDataset)
+        dataset.directory = "Emilia"
+        dataset.languages = {"EN"}
+        dataset.max_shards = 1
+        dataset.verbose = False
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "shards.txt"
+            manifest.write_text(
+                "Emilia/FR/ignored.tar\n"
+                "Emilia/EN/second.tar\n"
+                "Emilia/EN/not-a-shard.json\n"
+                "Emilia/EN/first.tar\n"
+            )
+            dataset.shard_manifest_file = manifest
+
+            self.assertEqual(dataset._list_shards(), ["Emilia/EN/first.tar"])
+
     def test_short_emilia_clips_expand_linearly_and_updates_target_audio_seconds(self):
         dataset = object.__new__(EmiliaLengthSortedBatchDataset)
         dataset.reference_batch_size = 24

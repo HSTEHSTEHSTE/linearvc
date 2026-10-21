@@ -14,7 +14,7 @@ training:
   random_seed: 42
   content_factorization:
     type: content
-    content_factorization_file: /home/hltcoe/xli/ARTS/linearvc/exp/content_factorization/librispeech_train-clean-100/rank_75/src_103/transforms.npy
+    content_factorization_file: /weka/scratch/jhu/nandrew9/xli257/linearvc/assets/cf_tts/content_factorization/transforms.npy
     # Default: use the globally learned 1024x75 UTXSS basis beside transforms.npy.
     # Compatibility option: content_projection: pinv_anchor
     content_projection: utxss
@@ -30,7 +30,7 @@ training:
   clip_grad_norm: 1.0
   use_grad_scaler: true
   log_every: 100
-  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/emilia_en_style3s_4ksec
+  out_dir: /weka/scratch/jhu/nandrew9/xli257/linearvc/outputs/cf_tts/emilia_en_style3s_4ksec
   # Lightweight recovery checkpoints are frequent; full validation remains
   # less frequent because it runs 100 Common Voice batches plus synthesis.
   save_every_steps: 500
@@ -87,7 +87,7 @@ data:
   text_tokenizer:
     type: phone
     pre_phonemized: false
-    tokenizer_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/LibriSpeech/spm/phones_espeak.json
+    tokenizer_file: /weka/scratch/jhu/nandrew9/xli257/linearvc/assets/cf_tts/phones_espeak.json
   accent:
     use_accent: false
     accent_file: /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/spm/accents.json
@@ -116,7 +116,9 @@ data:
     # Long transcripts are gradient-accumulated in microbatches. The square
     # budget equals the probe workload: 24 clips * 400 phones squared.
     streaming_token_square_budget: 3840000
-    streaming_max_tokens_per_utterance: 1600
+    # Emilia EN's observed p99 is 253 phone tokens. Discard longer transcripts
+    # so padded self-attention stays within the measured GPU memory budget.
+    streaming_max_tokens_per_utterance: 256
     # Emilia EN's largest currently listed shard is about 7 GiB. Retain at most
     # 10 GiB of compressed shard samples before length sorting; the Slurm job
     # requests 32 GiB of CPU RAM to leave headroom for decoding and Python.
@@ -152,18 +154,19 @@ data:
     dataset: commonvoice
     load_path: null
     commonvoice_subsets:
-      - /home/hltcoe/xli/ARTS/linearvc/exp/asr/CommonVoice/clips/dev.tsv
+      - /weka/scratch/jhu/nandrew9/xli257/linearvc/assets/cf_tts/commonvoice_en_dev_only/dev.tsv
     epoch_batch_limit: 100
     shuffle_batches: true
     shuffle_batches_between_epochs: false
     # This explicit target makes qualitative validation comparable across
     # checkpoints. The associated prompt is a different deterministic
     # same-speaker utterance selected by TTSDataset.
-    validation_audio_target_path: /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/commonvoice/en/clips/common_voice_en_39588868.mp3
+    validation_audio_target_path: /weka/scratch/jhu/nandrew9/xli257/linearvc/assets/cf_tts/commonvoice_en_dev_only/clips/common_voice_en_39588868.mp3
     # Qualitative inference does not use the target audio or its duration.
     validation_audio_duration_seconds: 8.0
     validation_audio_seed: 42
-  commonvoice_root_path: /home/hltcoe/xli/ARTS/geolocation/icefall/egs/radio/geolocation/corpora/commonvoice/en
+  commonvoice_root_path: /weka/scratch/jhu/nandrew9/xli257/linearvc/assets/cf_tts/commonvoice_en_dev_only
   sampling_rate: 16000
   max_audio_len: 480000
-  sort_by_length: false
+  # Both finite and Emilia streaming loaders form length-homogeneous batches.
+  sort_by_length: true

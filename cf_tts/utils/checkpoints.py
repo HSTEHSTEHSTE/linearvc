@@ -3,6 +3,11 @@ import re
 import torch
 
 
+def _checkpoint_model(model):
+    """Return the underlying module so DDP checkpoints stay single-GPU compatible."""
+    return model.module if hasattr(model, "module") else model
+
+
 def manage_checkpoints(ckpt_dir, keep_loss=5, keep_epoch=5, keep_step=5):
     LOSS_RE  = re.compile(r"ckpt_loss_([0-9.]+)_")
     EPOCH_RE = re.compile(r"_epoch_([0-9]+)\.pt$")
@@ -79,7 +84,7 @@ def manage_checkpoints(ckpt_dir, keep_loss=5, keep_epoch=5, keep_step=5):
 def save_checkpoint(model, optimizer, step, path, outdir, cfg, data_cursor=None):
     """Atomically write a checkpoint, including an optional dataset cursor."""
     checkpoint = {
-        "model": model.state_dict(),
+        "model": _checkpoint_model(model).state_dict(),
         "optimizer": optimizer.state_dict(),
         "step": step,
         "data_cursor": data_cursor,
@@ -96,7 +101,12 @@ def save_checkpoint(model, optimizer, step, path, outdir, cfg, data_cursor=None)
 
 def load_checkpoint(model, path, device, optimizer=None, return_checkpoint=False):
     ckpt = torch.load(path, map_location=device)
-    model.load_state_dict(ckpt["model"])
+    state_dict = ckpt["model"]
+    # Accept a checkpoint accidentally saved from a DDP wrapper as well as
+    # the canonical unwrapped format written above.
+    if state_dict and all(key.startswith("module.") for key in state_dict):
+        state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
+    _checkpoint_model(model).load_state_dict(state_dict)
     if optimizer is not None:
         optimizer.load_state_dict(ckpt["optimizer"])
     return ckpt if return_checkpoint else ckpt["step"]

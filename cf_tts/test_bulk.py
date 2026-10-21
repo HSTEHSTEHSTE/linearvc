@@ -16,6 +16,7 @@ from linearvc.cf_tts.models.tts import ZipVoice
 
 from linearvc.cf_tts.utils.common import normalize_input, invert_normalized_input, load_config, get_speaker_feats, load_content_projection
 from linearvc.cf_tts.utils.checkpoints import load_checkpoint
+from linearvc.cf_tts.utils.artifacts import configure_artifact_environment
 
 
 # -------------------------
@@ -31,6 +32,8 @@ def main():
     parser.add_argument("--sampling_steps", default=16, type=int)
     parser.add_argument("--vad", default=True, type=bool)
     args = parser.parse_args()
+
+    configure_artifact_environment()
 
     cfg = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

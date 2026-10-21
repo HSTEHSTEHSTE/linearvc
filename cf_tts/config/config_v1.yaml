@@ -21,7 +21,7 @@ training:
   log_every: 50
 
   # Checkpoint managedment
-  out_dir: /home/hltcoe/xli/ARTS/linearvc/exp/tts/cf_tts/v1.7
+  out_dir: /weka/scratch/jhu/nandrew9/xli257/linearvc/outputs/cf_tts/v1.7
   save_every_steps: 1000
   save_every_epochs: 1
   num_ckpt_best_loss: 3

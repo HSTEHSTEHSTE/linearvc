@@ -6,7 +6,9 @@ from cuvs.neighbors import brute_force
 
 from linearvc import linearvc
 from linearvc.cf_tts.utils.common import get_speaker_feats, match_knn
+from linearvc.cf_tts.utils.artifacts import artifact_root, configure_artifact_environment
 
+configure_artifact_environment()
 device = 'cuda'
 
 
@@ -40,7 +42,7 @@ transform = {
 }
 
 librispeech_root = Path('/home/hltcoe/xli/ARTS/anon_baseline/data/LibriSpeech')
-out_path = Path('/home/hltcoe/xli/ARTS/anon_baseline/data/librispeech_norm')
+out_path = artifact_root() / 'outputs' / 'normalization' / 'librispeech_norm'
 
 wavs = list(librispeech_root.rglob("*.flac"))
 with torch.no_grad():

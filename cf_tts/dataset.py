@@ -1,6 +1,8 @@
 # cf_tts/dataset.py
 import io
+import logging
 import os
+import sys
 import json, yaml
 import queue
 import random
@@ -15,6 +17,26 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import torch, torchaudio
 from torch.utils.data import Dataset, IterableDataset, Sampler, get_worker_info
+from linearvc.cf_tts.utils.artifacts import artifact_root
+
+
+def load_audio(source):
+    """Load audio with SoundFile fallback for MP3-capable validation sets."""
+    try:
+        return torchaudio.load(source)
+    except (OSError, RuntimeError) as torchaudio_error:
+        try:
+            import soundfile as sf
+
+            if hasattr(source, "seek"):
+                source.seek(0)
+            samples, sampling_rate = sf.read(source, dtype="float32", always_2d=True)
+            return torch.from_numpy(samples.T.copy()), sampling_rate
+        except Exception as soundfile_error:
+            raise RuntimeError(
+                f"Unable to decode audio source {source!r}. Torchaudio failed: {torchaudio_error}; "
+                f"SoundFile fallback failed: {soundfile_error}"
+            ) from soundfile_error
 
 
 class TTSDatum:
@@ -48,6 +70,7 @@ class TTSDataset(Dataset):
         config_file_path: str,
         split: str = 'train', # train, dev, test
         data: list[TTSDatum] = None,
+        verbose: bool = True,
     ):
         self.resamplers = {}
 
@@ -62,10 +85,12 @@ class TTSDataset(Dataset):
             self.data: List[TTSDatum] = []
 
             # load data
-            print("Reading Data")
+            if verbose:
+                print("Reading Data")
             if self.config['data'][split]['dataset'] == 'librispeech':
                 for subset in self.config['data'][split]['librispeech_subsets']:
-                    print("Processing ", subset)
+                    if verbose:
+                        print("Processing ", subset)
                     transcript_files = list((Path(self.config['data']['librispeech_transcript_path']) / subset).glob('*.txt'))
                     spks = []
                     for transcript_file in tqdm(transcript_files):
@@ -88,7 +113,8 @@ class TTSDataset(Dataset):
             elif self.config['data'][split]['dataset'] == 'commonvoice':
                 audio_root = Path(self.config['data']['commonvoice_root_path']) / 'clips'
                 for subset_file in self.config['data'][split]['commonvoice_subsets']:
-                    print("Processing ", subset_file)
+                    if verbose:
+                        print("Processing ", subset_file)
                     subset_df = pd.read_csv(subset_file, sep='|', header=0, index_col=None, quoting=3)
                     for entry in tqdm(subset_df.iterrows(), total=subset_df.shape[0]):
                         if self.config['data']['accent']['use_accent']:
@@ -142,10 +168,7 @@ class TTSDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
 
-        if item.wav_path.suffix == '.mp3':
-            wav, sr = torchaudio.load(item.wav_path)
-        else:
-            wav, sr = torchaudio.load(item.wav_path)
+        wav, sr = load_audio(item.wav_path)
         if sr != 16000:
             if sr not in self.resamplers:
                 self.resamplers[sr] = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
@@ -171,13 +194,21 @@ class EmiliaStreamingDataset(IterableDataset):
     The Emilia repository is gated.  Authenticate once with ``huggingface-cli
     login`` or set the token named by ``data.<split>.emilia.hf_token_env``
     (``HF_TOKEN`` by default) before starting training.  Audio and matching
-    JSON metadata are read progressively from the tar shards; no local copy of
-    the corpus or precomputed manifest is required.
+    JSON metadata are read progressively from the tar shards.  A precomputed
+    manifest may be supplied by the launcher to keep DDP workers from each
+    querying the Hub repository tree at startup.
     """
 
     _AUDIO_EXTENSIONS = ("flac", "wav", "mp3", "ogg", "opus", "m4a")
 
-    def __init__(self, config_file_path: str, split: str = "train"):
+    def __init__(
+        self,
+        config_file_path: str,
+        split: str = "train",
+        rank: int = 0,
+        world_size: int = 1,
+        verbose: bool = True,
+    ):
         super().__init__()
         with open(config_file_path, "r") as config_file:
             self.config = yaml.safe_load(config_file)
@@ -190,8 +221,27 @@ class EmiliaStreamingDataset(IterableDataset):
         self.directory = self.emilia_config.get("directory", "Emilia").strip("/")
         self.languages = set(self.emilia_config.get("languages", []))
         self.max_shards = self.emilia_config.get("max_shards")
+        shard_manifest_file = self.emilia_config.get("shard_manifest_file")
+        self.shard_manifest_file = (
+            Path(shard_manifest_file).expanduser().resolve()
+            if shard_manifest_file
+            else None
+        )
         self.shuffle_seed = int(self.emilia_config.get("shuffle_seed", self.config["training"]["random_seed"]))
-        self.token = os.environ.get(self.emilia_config.get("hf_token_env", "HF_TOKEN"))
+        token_env = self.emilia_config.get("hf_token_env", "HF_TOKEN")
+        self.token = os.environ.get(token_env)
+        if not self.token:
+            try:
+                from huggingface_hub import get_token
+
+                self.token = get_token()
+            except ImportError:
+                pass
+        if not self.token:
+            raise RuntimeError(
+                f"No Hugging Face token was found in ${token_env} or the cached `hf auth login` store. "
+                "Run `hf auth login` before launching Emilia training."
+            )
         self.text_key = self.emilia_config.get("text_key", "text")
         self.speaker_key = self.emilia_config.get("speaker_key", "speaker_id")
         self.json_key = self.emilia_config.get("json_key", "json")
@@ -215,15 +265,48 @@ class EmiliaStreamingDataset(IterableDataset):
             split_config.get("streaming_local_shard_cache_dir"),
         )
         if not shard_cache_dir:
-            shard_cache_dir = os.path.join(
-                os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
-                "cf_tts_emilia_shards",
-            )
+            shard_cache_dir = artifact_root() / "data" / "cf_tts" / "emilia_shards"
         self.local_shard_cache_dir = Path(shard_cache_dir).expanduser().resolve()
+        self.rank = 0
+        self.world_size = 1
+        self.verbose = verbose
+        self.set_distributed(rank, world_size)
         self.resume_cursor = None
         self.shards = self._list_shards()
 
+    def _log(self, message: str):
+        # Focused recovery tests construct a lightweight instance with
+        # ``object.__new__`` and intentionally skip normal initialization.
+        if getattr(self, "verbose", True):
+            print(message, flush=True)
+
+    def set_distributed(self, rank: int, world_size: int):
+        """Configure deterministic shard partitioning across DDP ranks."""
+        if world_size < 1 or not 0 <= rank < world_size:
+            raise ValueError(f"Invalid distributed shard partition: rank={rank}, world_size={world_size}")
+        self.rank = int(rank)
+        self.world_size = int(world_size)
+
     def _list_shards(self) -> List[str]:
+        if self.shard_manifest_file is not None:
+            if not self.shard_manifest_file.is_file():
+                raise RuntimeError(
+                    f"Configured Emilia shard manifest does not exist: {self.shard_manifest_file}"
+                )
+            shards = self._filter_shard_paths(
+                self.shard_manifest_file.read_text().splitlines()
+            )
+            if not shards:
+                raise RuntimeError(
+                    f"Configured Emilia shard manifest contains no usable shards: "
+                    f"{self.shard_manifest_file}"
+                )
+            self._log(
+                f"Streaming {len(shards)} Emilia shards from local manifest "
+                f"{self.shard_manifest_file}"
+            )
+            return shards
+
         try:
             from huggingface_hub import HfApi
         except ImportError as exc:
@@ -231,16 +314,31 @@ class EmiliaStreamingDataset(IterableDataset):
                 "Emilia streaming requires huggingface_hub. Install it in the training environment."
             ) from exc
 
-        prefix = f"{self.directory}/"
         api = HfApi(token=self.token)
+        shards = self._filter_shard_paths(
+            getattr(entry, "path", "")
+            for entry in api.list_repo_tree(
+                repo_id=self.repo_id,
+                repo_type="dataset",
+                revision=self.revision,
+                recursive=True,
+            )
+        )
+        if not shards:
+            languages = ", ".join(sorted(self.languages)) or "all languages"
+            raise RuntimeError(
+                f"No Emilia shards found under '{self.directory}' for {languages}. "
+                "Check the Hugging Face access token and Emilia configuration."
+            )
+        self._log(f"Streaming {len(shards)} Emilia shards from {self.repo_id}:{self.directory}")
+        return shards
+
+    def _filter_shard_paths(self, paths: Iterator[str]) -> List[str]:
+        """Apply the configured Emilia directory/language selection to paths."""
+        prefix = f"{self.directory}/"
         shards = []
-        for entry in api.list_repo_tree(
-            repo_id=self.repo_id,
-            repo_type="dataset",
-            revision=self.revision,
-            recursive=True,
-        ):
-            path = getattr(entry, "path", "")
+        for path in paths:
+            path = path.strip()
             if not path.startswith(prefix) or not path.endswith((".tar", ".tar.gz", ".tgz")):
                 continue
             relative_path = path[len(prefix):]
@@ -249,16 +347,9 @@ class EmiliaStreamingDataset(IterableDataset):
                 continue
             shards.append(path)
 
-        shards.sort()
+        shards = sorted(set(shards))
         if self.max_shards is not None:
             shards = shards[: int(self.max_shards)]
-        if not shards:
-            languages = ", ".join(sorted(self.languages)) or "all languages"
-            raise RuntimeError(
-                f"No Emilia shards found under '{self.directory}' for {languages}. "
-                "Check the Hugging Face access token and Emilia configuration."
-            )
-        print(f"Streaming {len(shards)} Emilia shards from {self.repo_id}:{self.directory}", flush=True)
         return shards
 
     def set_resume_cursor(self, cursor: Optional[Dict[str, Any]]):
@@ -299,7 +390,7 @@ class EmiliaStreamingDataset(IterableDataset):
 
         local_path = self._local_shard_path(shard_path)
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Staging Emilia shard locally: {shard_path}", flush=True)
+        self._log(f"Staging Emilia shard locally: {shard_path}")
         downloaded_path = hf_hub_download(
             repo_id=self.repo_id,
             filename=shard_path,
@@ -319,22 +410,46 @@ class EmiliaStreamingDataset(IterableDataset):
         return local_path
 
     def _open_shard_stream(self, shard_path: str):
-        """Create a local WebDataset stream for one fully staged tar shard."""
-        try:
-            from datasets import load_dataset
-        except ImportError as exc:
-            raise ImportError(
-                "Emilia streaming requires the Hugging Face datasets package. Install it in the training environment."
-            ) from exc
+        """Create a byte-preserving local WebDataset-style tar stream.
 
+        Emilia tar shards contain contiguous ``<sample-key>.<extension>``
+        members.  Reading them directly avoids Hugging Face ``datasets``
+        inferring an ``Audio`` feature, which in recent releases requires the
+        optional TorchCodec package even when audio decoding is disabled.
+        """
         local_path = self._stage_shard_file(shard_path)
-        stream = load_dataset(
-            "webdataset",
-            data_files=[str(local_path)],
-            split="train",
-            streaming=True,
-        ).decode(False)
-        return stream, local_path
+
+        def stream() -> Iterator[Dict[str, Any]]:
+            current_key = None
+            current_sample: Dict[str, Any] = {}
+            with tarfile.open(local_path, mode="r:*") as archive:
+                for member in archive:
+                    if not member.isfile():
+                        continue
+                    sample_key, separator, extension = member.name.rpartition(".")
+                    if not separator or not sample_key:
+                        continue
+                    extension = extension.lower()
+                    if extension not in self._AUDIO_EXTENSIONS and extension != self.json_key:
+                        continue
+
+                    if current_key is not None and sample_key != current_key:
+                        yield current_sample
+                        current_sample = {}
+                    current_key = sample_key
+
+                    extracted = archive.extractfile(member)
+                    if extracted is None:
+                        continue
+                    with extracted:
+                        current_sample[extension] = extracted.read()
+                    current_sample["__key__"] = sample_key
+                    current_sample["__url__"] = shard_path
+
+            if current_sample:
+                yield current_sample
+
+        return stream(), local_path
 
     @staticmethod
     def _is_transient_shard_error(error: BaseException) -> bool:
@@ -409,11 +524,10 @@ class EmiliaStreamingDataset(IterableDataset):
                     self.shard_retry_max_backoff_seconds,
                     self.shard_retry_backoff_seconds * (2 ** attempt),
                 )
-                print(
+                self._log(
                     f"Retrying Emilia shard {shard_path} from raw sample {next_raw_sample_index} "
                     f"after {type(exc).__name__}: {exc}. Retry {attempt + 1}/{self.shard_max_retries} "
-                    f"in {delay:.1f}s.",
-                    flush=True,
+                    f"in {delay:.1f}s."
                 )
                 time.sleep(delay)
 
@@ -471,14 +585,23 @@ class EmiliaStreamingDataset(IterableDataset):
             "accent": None,
         }
 
+    def _shards_for_worker(self, worker_id: int, num_workers: int) -> List[str]:
+        """Return this rank/worker's non-overlapping, deterministically shuffled shards."""
+        if not 0 <= worker_id < num_workers:
+            raise ValueError(f"Invalid DataLoader worker id {worker_id} for {num_workers} workers")
+        replica_id = self.rank * num_workers + worker_id
+        replica_count = self.world_size * num_workers
+        worker_shards = list(self.shards[replica_id::replica_count])
+        random.Random(self.shuffle_seed + replica_id).shuffle(worker_shards)
+        return worker_shards
+
     def __iter__(self) -> Iterator[Dict[str, Any]]:
         worker_info = get_worker_info()
         worker_id = worker_info.id if worker_info is not None else 0
         num_workers = worker_info.num_workers if worker_info is not None else 1
-        worker_shards = list(self.shards[worker_id::num_workers])
+        worker_shards = self._shards_for_worker(worker_id, num_workers)
         if not worker_shards:
             return
-        random.Random(self.shuffle_seed + worker_id).shuffle(worker_shards)
 
         resume_cursor = self.resume_cursor
         self.resume_cursor = None
@@ -749,22 +872,78 @@ class FrameBatchSampler(Sampler):
 
         if batch:
             self.batches.append(batch)
+        self.random_seed = int(self.config['training']['random_seed'])
         if self.config['data'][split]['shuffle_batches']:
-            random.seed(self.config['training']['random_seed'])
+            # Retain the historical single-process initialization order.
+            random.seed(self.random_seed)
             random.shuffle(self.batches)
         self.shuffle = self.config['data'][split]['shuffle_batches_between_epochs']
+        self.epoch = None
+
+    def set_epoch(self, epoch: int):
+        """Match DistributedSampler's epoch contract without mutating batch order."""
+        self.epoch = int(epoch)
 
 
     def __iter__(self):
+        batches = self.batches
         if self.shuffle:
-            random.shuffle(self.batches)
-        for batch in self.batches:
+            if self.epoch is None:
+                # Preserve the original single-GPU behavior when DDP is not
+                # active: shuffle the persistent batch list with Python's
+                # process RNG each epoch.
+                random.shuffle(batches)
+            else:
+                batches = list(self.batches)
+                random.Random(self.random_seed + self.epoch).shuffle(batches)
+        for batch in batches:
             yield batch
         
 
     def __len__(self):
         # PyTorch allows this to be approximate
         return len(self.batches)
+
+
+class DistributedBatchSampler(Sampler):
+    """Partition already-formed batches across DDP ranks without sample overlap.
+
+    FrameBatchSampler owns the length-aware batch construction. This wrapper
+    assigns whole batches round-robin to ranks and drops only the incomplete
+    final rank group, which keeps every rank on the same number of optimizer
+    updates without duplicating examples.
+    """
+
+    def __init__(self, batch_sampler: Sampler, num_replicas: int, rank: int, drop_last: bool = True):
+        if num_replicas < 1 or not 0 <= rank < num_replicas:
+            raise ValueError(f"Invalid distributed batch partition: rank={rank}, replicas={num_replicas}")
+        self.batch_sampler = batch_sampler
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.drop_last = bool(drop_last)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+        if hasattr(self.batch_sampler, "set_epoch"):
+            self.batch_sampler.set_epoch(epoch)
+
+    def __iter__(self):
+        batches = list(iter(self.batch_sampler))
+        if self.drop_last:
+            usable = len(batches) - (len(batches) % self.num_replicas)
+            batches = batches[:usable]
+        elif len(batches) % self.num_replicas:
+            # Kept for API completeness. CF-TTS uses drop_last=True so no
+            # utterance is repeated across ranks.
+            batches.extend(batches[: self.num_replicas - (len(batches) % self.num_replicas)])
+        yield from batches[self.rank::self.num_replicas]
+
+    def __len__(self):
+        total = len(self.batch_sampler)
+        if self.drop_last:
+            return total // self.num_replicas
+        return (total + self.num_replicas - 1) // self.num_replicas
 
 
 # -------------------------
@@ -801,19 +980,41 @@ class TTS_Collate:
             if not self.pre_phonemized:
                 from phonemizer.backend import EspeakBackend
                 from phonemizer.separator import Separator
+
+                # eSpeak-NG is installed into the training Conda environment.
+                # Phonemizer normally searches only system library paths, so
+                # point it at the prefix-local shared library when available.
+                conda_prefix = Path(sys.prefix)
+                for library_dir in ('lib', 'lib64'):
+                    library = conda_prefix / library_dir / 'libespeak-ng.so.1'
+                    if library.is_file():
+                        os.environ.setdefault('PHONEMIZER_ESPEAK_LIBRARY', str(library))
+                        data_dir = conda_prefix / 'share' / 'espeak-ng-data'
+                        if data_dir.is_dir():
+                            os.environ.setdefault('PHONEMIZER_ESPEAK_DATA_PATH', str(data_dir))
+                        break
+
                 self.separator = Separator(phone='-', word=' ')
+                # eSpeak reports word-count mismatches for noisy corpus text
+                # even when the configured ``ignore`` policy keeps processing.
+                # Keep those diagnostics out of every DDP rank's shared log;
+                # malformed records are still handled below during collation.
+                phonemizer_logger = logging.getLogger('linearvc.phonemizer')
+                phonemizer_logger.setLevel(logging.ERROR)
                 if len(punctuation_marks) > 0:
                     backend = EspeakBackend(
                         language='en-us', 
                         preserve_punctuation=True, 
                         punctuation_marks=punctuation_marks,
-                        words_mismatch='ignore'
+                        words_mismatch='ignore',
+                        logger=phonemizer_logger,
                     )
                 else:
                     backend = EspeakBackend(
                         language='en-us', 
                         preserve_punctuation=True, 
-                        words_mismatch='ignore'
+                        words_mismatch='ignore',
+                        logger=phonemizer_logger,
                     )
                 self.phonemize = backend.phonemize
         
@@ -830,7 +1031,7 @@ class TTS_Collate:
         if "audio_bytes" not in item:
             return item["wav"]
 
-        wav, sampling_rate = torchaudio.load(io.BytesIO(item["audio_bytes"]))
+        wav, sampling_rate = load_audio(io.BytesIO(item["audio_bytes"]))
         if wav.size(0) > 1:
             wav = wav.mean(dim=0)
         else:
@@ -847,7 +1048,7 @@ class TTS_Collate:
         return wav
 
     def _load_prompt_wav(self, wav_path: Path) -> torch.Tensor:
-        wav, sampling_rate = torchaudio.load(wav_path)
+        wav, sampling_rate = load_audio(wav_path)
         if wav.size(0) > 1:
             wav = wav.mean(dim=0)
         else:
@@ -864,7 +1065,11 @@ class TTS_Collate:
     def __call__(self, batch: List[Dict]):
         wavs = [self._load_wav(b) for b in batch]
         speakers = [b["speaker"] for b in batch]
-        texts_raw = [str(b["text"]) for b in batch]
+        # eSpeak's batch API treats embedded newlines as utterance boundaries.
+        # Emilia metadata can contain line breaks, which would otherwise emit
+        # more phoneme sequences than audio examples and corrupt downstream
+        # microbatch indices.
+        texts_raw = [re.sub(r"\s+", " ", str(b["text"])).strip() for b in batch]
         texts = []
         if self.tokenizer_type == 'spm':
             for text_raw in texts_raw:
@@ -876,10 +1081,36 @@ class TTS_Collate:
                     texts.append([self.text_tokenizer[phone] for phone in text_raw if phone in self.text_tokenizer])
             else:
                 phones = self.phonemize(texts_raw, separator=self.separator, strip=True)
-                phones = [re.sub(r"""([;:,.!?¡¿—…"«»“”\(\)\{\}\[\]])""", r"-\1", phone) for phone in phones]
-                phones = [phone.replace('- ', '-').replace(' ', '-').split('-') for phone in phones]
-                for text in phones:
-                    texts.append([self.text_tokenizer[token] for token in text if token in self.text_tokenizer])
+                if len(phones) != len(texts_raw):
+                    # Some malformed corpus text can still confuse eSpeak's
+                    # batched line handling. Fall back to one transcript at a
+                    # time so a token sequence can never be paired with the
+                    # wrong waveform.
+                    phones = []
+                    for text_raw in texts_raw:
+                        phonemized = self.phonemize([text_raw], separator=self.separator, strip=True)
+                        phones.append(phonemized[0] if len(phonemized) == 1 else None)
+
+                valid_indices = []
+                for index, phone in enumerate(phones):
+                    if not phone:
+                        continue
+                    phone = re.sub(r"""([;:,.!?¡¿—…"«»“”\(\)\{\}\[\]])""", r"-\1", phone)
+                    phone_tokens = phone.replace('- ', '-').replace(' ', '-').split('-')
+                    text = [self.text_tokenizer[token] for token in phone_tokens if token in self.text_tokenizer]
+                    if text:
+                        valid_indices.append(index)
+                        texts.append(text)
+
+                # Emilia includes occasional empty or non-linguistic metadata
+                # fields. eSpeak returns no sequence for those records; omit
+                # just those examples rather than terminating every DDP rank.
+                if not valid_indices:
+                    raise RuntimeError("No phonemizable transcripts remained in a training batch.")
+                if len(valid_indices) != len(batch):
+                    batch = [batch[index] for index in valid_indices]
+                    wavs = [wavs[index] for index in valid_indices]
+                    speakers = [speakers[index] for index in valid_indices]
 
         if self.use_accent:
             accents_raw = [b["accent"] for b in batch]
